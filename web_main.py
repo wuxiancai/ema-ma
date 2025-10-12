@@ -818,6 +818,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const tpCls = isFinite(tpNum) ? (tpNum>0?'green':(tpNum<0?'red':'')) : '';
             const roiCls = isFinite(roiNum) ? (roiNum>0?'green':(roiNum<0?'red':'')) : '';
             let valCls = '';
+            const sideCls = (side === 'LONG' ? 'green' : (side === 'SHORT' ? 'red' : ''));
             if (pos.side && pos.entry_price && pos.qty && s.current_price) {
               const ep = Number(pos.entry_price), cp = Number(s.current_price), q = Number(pos.qty);
               const openPnl = pos.side === 'LONG' ? (cp - ep) * q : (ep - cp) * q;
@@ -825,7 +826,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             }
             document.getElementById('position').innerHTML = `
               <p>总盈亏: <b class="${tpCls}">${tp}</b> · 总利润率: <b class="${roiCls}">${roiPct}</b> · 总手续费: <b>${tf}</b> · 交易次数: <b>${tc}</b></p>
-              <p>方向: <b>${side}</b> · 开仓价: ${entry} · 数量: ${qty} · 当前价值: <span class="${valCls}">${val}</span></p>
+              <p>方向: <b class="${sideCls}">${side}</b> · 开仓价: ${entry} · 数量: ${qty} · 当前价值: <span class="${valCls}">${val}</span></p>
             `;
             const tb = document.querySelector('#trades tbody');
             tb.innerHTML = '';
@@ -844,9 +845,10 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               const pnlCls = (isFinite(pnlNum) && pnlNum !== 0) ? (pnlNum>0?'green':'red') : '';
               const rateNum = (isFinite(pnlNum) && isFinite(notional) && notional > 0) ? (pnlNum / notional) : NaN;
               const rateCls = (isFinite(rateNum) && rateNum !== 0) ? (rateNum>0?'green':'red') : '';
+              const sideCls2 = (t.side === 'LONG' ? 'green' : (t.side === 'SHORT' ? 'red' : ''));
               tb.innerHTML += `<tr>
                 <td>${d}</td>
-                <td>${t.side}</td>
+                <td class="${sideCls2}">${t.side}</td>
                 <td>${isFinite(price) ? price.toFixed(1) : '-'}</td>
                 <td>${isFinite(qty) ? qty.toFixed(4) : '-'}</td>
                 <td>${isFinite(fee) ? fee.toFixed(2) : '-'}</td>
