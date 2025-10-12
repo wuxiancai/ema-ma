@@ -243,6 +243,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               /* 参考图2卡片内部的斜向暖米色渐变 */
               --card-light: #f2e3c5;
               --card-dark: #dec79f;
+              /* 最近交易行高用于计算显示 3 行高度 */
+              --row-h: 32px;
             }
 
             /* 背景：低饱和渐变 + 轻微噪点，素雅不抢眼 */
@@ -355,14 +357,16 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             /* 最近交易：默认仅显示 3 行，支持滚动查看更多 */
             #trades { table-layout: fixed; }
             #trades thead, #trades tbody tr { display: table; width: 100%; table-layout: fixed; }
-            #trades tbody { display: block; max-height: calc(3 * var(--row-h, 36px)); overflow-y: auto; }
+            #trades tbody { display: block; max-height: calc(3 * var(--row-h, 32px)); overflow-y: auto; }
+            /* 缩短行间距，避免第三行被遮挡 */
+            #trades th, #trades td { padding: 4px 8px; }
             /* 滚动条默认隐藏，悬停时显示 */
-            #trades tbody { scrollbar-width: none; }
-            #trades tbody:hover { scrollbar-width: thin; }
+            #trades tbody { scrollbar-width: none; scrollbar-color: transparent transparent; }
+            #trades tbody:hover { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.25) transparent; }
             #trades tbody::-webkit-scrollbar { width: 0; height: 0; }
-            #trades tbody:hover::-webkit-scrollbar { width: 8px; height: 8px; }
-            #trades tbody::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 6px; }
-            #trades tbody::-webkit-scrollbar-track { background: rgba(0,0,0,.05); }
+            #trades tbody:hover::-webkit-scrollbar { width: 6px; height: 6px; }
+            #trades tbody::-webkit-scrollbar-thumb { background: rgba(0,0,0,.25); border-radius: 6px; }
+            #trades tbody::-webkit-scrollbar-track { background: transparent; }
 
             /* 盈亏颜色：稍微降低饱和度，保持辨识度 */
             .green { color: #0f766e; }
