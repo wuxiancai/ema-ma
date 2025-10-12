@@ -231,16 +231,141 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
           <meta name=viewport content="width=device-width, initial-scale=1">
           <title>EMA/MA 自动交易系统</title>
           <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+            :root {
+              /* 玻璃主题（参考图2）：温润米色底 + 蓝色标题 */
+              --bg-1: #eee6cf;
+              --bg-2: #e5d5b0;
+              --text-1: #1f2937;
+              --text-2: #4b5563;
+              --line: rgba(0,0,0,.10);
+              --blue: #0E4AA8; /* 参考图的深蓝 */
+              --card-bg: #f5f4f3; /* 卡片内部底色，统一为页面米色 */
+              /* 参考图2卡片内部的斜向暖米色渐变 */
+              --card-light: #f2e3c5;
+              --card-dark: #dec79f;
+            }
+
+            /* 背景：低饱和渐变 + 轻微噪点，素雅不抢眼 */
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+              margin: 24px;
+              color: var(--text-1);
+              background: #f5f4f3;
+            }
+            /* 顶左高光与底右暗角，模拟参考图2的环境光 */
+            body::before, body::after {
+              content: '';
+              position: fixed; inset: 0; pointer-events: none;
+            }
+            body::before {
+              /* 取消叠加高光 */
+              background: none;
+            }
+            body::after {
+              /* 取消叠加暗角 */
+              background: none;
+            }
+
+            /* 标题：纯色蓝，不用渐变 */
+            h1, h2 { margin: 0 0 8px 0; color: var(--blue); }
             h1 { font-size: 20px; }
+            h2 { font-size: 16px; }
+            .card h2 { text-align: center; }
+
+            /* 网格布局保持不变，仅调整间距为紧凑视觉 */
             .grid { display: grid; grid-template-columns: repeat(2, minmax(300px, 1fr)); gap: 16px; }
             .grid1 { display: grid; grid-template-columns: 1fr; gap: 16px; }
-            .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; }
-            .green { color: #16a34a; }
-            .red { color: #dc2626; }
-            code { background: #f5f5f5; padding: 2px 6px; border-radius: 4px; }
+
+            /* 卡片：玻璃质感（双层边框 + 高光 + 轻内阴影） */
+            .card {
+              position: relative;
+              overflow: hidden;
+              padding: 12px;
+              
+              border-radius: 28px;
+              /* 内部改为磨砂玻璃：半透明叠层 + 细噪点 */
+              background:
+                linear-gradient(180deg, rgba(245,244,243,.60), rgba(245,244,243,.45)),
+                radial-gradient(rgba(255,255,255,.10) 1px, transparent 1px),
+                radial-gradient(rgba(0,0,0,.03) 1px, transparent 1px);
+              background-size: auto, 2px 2px, 3px 3px;
+              background-position: 0 0, 0 0, 1px 1px;
+              background-blend-mode: normal, soft-light, soft-light;
+              
+              backdrop-filter: blur(16px) saturate(120%);
+              -webkit-backdrop-filter: blur(16px) saturate(120%);
+              box-shadow:
+                0 6px 14px rgba(0,0,0,.18), /* 次级外部投影：提升立体层次 */
+                0 16px 32px rgba(0,0,0,.24), /* 主外部投影 */
+                inset 0 0 0 1.5px rgba(255,255,255,.45), /* 内沿细亮线（更亮更清晰） */
+                inset -12px -14px 26px rgba(0,0,0,.22); /* 底右内暗角（更厚更立体） */
+              /* 不使用边框渐变，改用伪元素绘制圆角环形高光 */
+              border: 0;
+            }
+
+            /* 顶左高光斑与内圈暗带，增强厚度与高光走向 */
+            .card::before {
+              content: '';
+              /* 使用遮罩绘制“环形高光”，严格沿圆角边缘，不影响内部 */
+              position: absolute; inset: 0;
+              border-radius: inherit;
+              pointer-events: none;
+              padding: 12px; /* 高光环加宽，强化厚边质感 */
+              background: linear-gradient(135deg,
+                rgba(255,255,255,.90) 0%,  /* 顶左更亮的切边高光 */
+                rgba(255,255,255,.45) 40%,
+                rgba(0,0,0,.22) 100%      /* 底右更明显的暗角走向 */
+              );
+              -webkit-mask:
+                linear-gradient(#fff 0 0) content-box,
+                linear-gradient(#fff 0 0);
+              -webkit-mask-composite: xor;
+                      mask-composite: exclude;
+            }
+
+            /* 额外外环（次级弧边，提升圆润感） */
+            .card::after {
+              content: '';
+              position: absolute; inset: -3px; /* 外扩更明显，形成次级外缘 */
+              border-radius: inherit;
+              pointer-events: none;
+              /* 外缘微环：顶左外沿轻亮、底右外沿轻暗，增强圆润厚度 */
+              padding: 3px;
+              background: linear-gradient(135deg,
+                rgba(255,255,255,.35) 0%,
+                rgba(255,255,255,.15) 35%,
+                rgba(0,0,0,.10) 100%
+              );
+              -webkit-mask:
+                linear-gradient(#fff 0 0) content-box,
+                linear-gradient(#fff 0 0);
+              -webkit-mask-composite: xor;
+                      mask-composite: exclude;
+              box-shadow: none;
+            }
+
+            /* 文本与分隔线：更柔和、素雅 */
+            p { color: var(--text-2); margin: 0 0 8px 0; }
+
+            /* 表格：极细边与行悬停微亮 */
+            table { width: 100%; border-collapse: collapse; border: 0; }
+            thead th { color: var(--text-2); font-weight: 600; }
+            th, td { border-bottom: 0; padding: 6px 8px; text-align: left; }
+            tbody tr:hover { background: rgba(255,255,255,.04); }
+
+            /* 盈亏颜色：稍微降低饱和度，保持辨识度 */
+            .green { color: #0f766e; }
+            .red { color: #b91c1c; }
+
+            /* 数值 code：胶囊玻璃质感，紧凑呈现 */
+            code {
+              color: #1f2f4f;
+              background: transparent; /* 完全移除白色背景 */
+              border: 0;
+              box-shadow: none;
+              padding: 0; /* 取消内边距，去除“胶囊”形态 */
+              border-radius: 0; /* 取消圆角 */
+            }
           </style>
         </head>
         <body>
