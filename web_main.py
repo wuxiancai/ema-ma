@@ -244,7 +244,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               --card-light: #f2e3c5;
               --card-dark: #dec79f;
               /* 最近交易行高用于计算显示 3 行高度 */
-              --row-h: 34px;
+              --row-h: 35px;
             }
 
             /* 背景：低饱和渐变 + 轻微噪点，素雅不抢眼 */
@@ -357,7 +357,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             /* 最近交易：默认仅显示 3 行，支持滚动查看更多 */
             #trades { table-layout: fixed; }
             #trades thead, #trades tbody tr { display: table; width: 100%; table-layout: fixed; }
-            #trades tbody { display: block; max-height: calc(3 * var(--row-h, 34px)); overflow-y: auto; }
+            #trades tbody { display: block; max-height: calc(3 * var(--row-h, 35px)); overflow-y: auto; }
             /* 缩短行间距，避免第三行被遮挡 */
             #trades th, #trades td { padding: 4px 8px; }
             /* 滚动条默认隐藏，悬停时显示 */
