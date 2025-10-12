@@ -14,11 +14,12 @@ from pathlib import Path
 import re
 from typing import Any
 
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, Response, request
 import psutil
 import queue
 
 from binance_client import BinanceClient
+from indicators import ema as calc_ema, sma as calc_sma
 from binance_websocket import BinanceWebSocket
 from trading import TradingEngine
 
@@ -208,6 +209,60 @@ def start_ws(
 def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue.Queue, *, enable_poller: bool):
     app = Flask(__name__)
 
+    def _interval_to_per_day(interval: str) -> int:
+        try:
+            s = interval.strip().lower()
+            if s.endswith('m'):
+                mins = int(s[:-1])
+                return max(1, (24*60)//mins)
+            if s.endswith('h'):
+                hrs = int(s[:-1])
+                return max(1, 24//hrs)
+            if s.endswith('d'):
+                days = int(s[:-1])
+                return max(1, 1//max(1, days))
+        except Exception:
+            pass
+        return 1440  # 默认按 1m 处理
+
+    @app.route('/chart')
+    def api_chart():
+        # 严格默认仅返回最新 100 根；如需更多由 ?limit= 指定
+        default_limit = 100
+        try:
+            limit = int(request.args.get('limit', default_limit))
+        except Exception:
+            limit = default_limit
+        rows = engine.recent_klines(limit)
+        # recent_klines 返回按 id DESC（时间倒序），此处转为时间升序供前端使用
+        rows_asc = list(reversed(rows))
+        ts = [r['close_time'] for r in rows_asc]
+        opens = [float(r['open']) for r in rows_asc]
+        highs = [float(r['high']) for r in rows_asc]
+        lows = [float(r['low']) for r in rows_asc]
+        closes = [float(r['close']) for r in rows_asc]
+        vols = [float(r.get('volume', 0.0)) for r in rows_asc]
+        # 计算 EMA/MA：使用引擎完整历史（data_period_days）计算的序列，随后截取最后 N 根
+        N = len(rows_asc)
+        ema_full = getattr(engine, 'ema_list', []) or []
+        ma_full = getattr(engine, 'ma_list', []) or []
+        ema_list = (ema_full[-N:] if len(ema_full) >= N else ema_full)
+        ma_list = (ma_full[-N:] if len(ma_full) >= N else ma_full)
+        return jsonify({
+            'symbol': engine.symbol,
+            'interval': engine.interval,
+            'ema_period': engine.ema_period,
+            'ma_period': engine.ma_period,
+            'time': ts,
+            'open': opens,
+            'high': highs,
+            'low': lows,
+            'close': closes,
+            'volume': vols,
+            'ema': ema_list,
+            'ma': ma_list,
+        })
+
     @app.route("/status")
     def api_status():
         s = engine.status()
@@ -359,6 +414,26 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
 
             /* 文本与分隔线：更柔和、素雅 */
             p { color: var(--text-2); margin: 0 0 8px 0; }
+            /* K线图容器尺寸 */
+            #plot_kline { width: 100%; height: 420px; }
+            /* K线图标题左对齐，避免与悬停条冲突 */
+            #title_kline { text-align: left; padding-left: 12px; }
+            /* 顶部悬停信息条 */
+            .hoverbar {
+              position: absolute; top: 16px; right: 24px; left: auto;
+              background: rgba(255,255,255,.35);
+              backdrop-filter: blur(6px) saturate(120%);
+              -webkit-backdrop-filter: blur(6px) saturate(120%);
+              border: 1px solid rgba(255,255,255,.45);
+              border-radius: 10px;
+              padding: 6px 10px;
+              font-size: 12px; color: #0f172a; text-align: right;
+              box-shadow: 0 6px 12px rgba(0,0,0,.12);
+              display: none; z-index: 10;
+              pointer-events: none;
+              max-width: 60%;
+              white-space: nowrap;
+            }
             /* 实时K线卡片中的系统信息（位于表格下方的一行） */
             .kmeta {
               color: var(--text-2);
@@ -406,14 +481,20 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             /* 系统参数配置：值颜色较 key 略深但不过分（仅作用于该卡片） */
             #cfg code { color: #106697; }
           </style>
-        </head>
-        <body>
+          </head>
+          <body>
           <div class="hero">
             <h1>EMA/MA 兑复量化系统 · __SYM__ · __INTERVAL__</h1>
             <span class="subtitle-inline">兑复相生 · 财富自来 · Power by 无为</span>
           </div>
           <div id="meta"></div>
+          <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
           <div class="grid1" style="margin:8px 0 16px 0">
+            <div class="card">
+              <h2 id="title_kline">K 线图</h2>
+              <div id="plot_kline"></div>
+              <div id="hoverbar" class="hoverbar"></div>
+            </div>
             <div class="card">
               <h2>系统参数配置</h2>
               <div id="cfg"></div>
@@ -439,6 +520,16 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             </div>
           </div>
           <script>
+          // 交互状态：当前加载的根数、当前可视范围、当前最早时间戳
+          let K_LIMIT = 100;
+          let K_EARLIEST_TS = null;
+          let LAST_RANGE = null;
+          let RELOADING = false;
+          // 悬停与最新 K 线的实时刷新所需的全局状态
+          let K_TIMES = [];
+          let K_CLOSE = [];
+          let CURRENT_HOVER_INDEX = null;
+
           function fmtPct(x){ return (x===undefined||x===null||isNaN(Number(x))) ? '-' : (Number(x).toFixed(1) + '%'); }
           function fmtBytes(b){
             const n = Number(b);
@@ -450,6 +541,141 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             if (n >= KB) return (n/KB).toFixed(0) + 'K';
             return n.toFixed(0) + 'B';
           }
+          async function renderChart(limit = K_LIMIT, preserveRange = null) {
+            try {
+              K_LIMIT = limit;
+              const r = await fetch(`/chart?limit=${K_LIMIT}`);
+              const d = await r.json();
+              const t = d.time.map(x => new Date(Number(x)));
+              const vol = d.volume;
+              const incColor = '#16a34a';
+              const decColor = '#dc2626';
+              const candle = {
+                type: 'candlestick',
+                x: t,
+                open: d.open, high: d.high, low: d.low, close: d.close,
+                name: '',
+                increasing: { line: { color: incColor }, fillcolor: incColor },
+                decreasing: { line: { color: decColor }, fillcolor: decColor },
+                opacity: 0.95,
+                hoverinfo: 'skip',
+                customdata: vol,
+              };
+              const ema = {
+                type: 'scatter', mode: 'lines', x: t, y: d.ema,
+                name: `EMA(${d.ema_period})`, line: { color: '#106697', width: 1.6 },
+                hoverinfo: 'skip'
+              };
+              const ma = {
+                type: 'scatter', mode: 'lines', x: t, y: d.ma,
+                name: `MA(${d.ma_period})`, line: { color: '#f59e0b', width: 1.6 },
+                hoverinfo: 'skip'
+              };
+              // 自定义统一悬停触发：不可见散点，仅用于触发 hover 事件
+              const hoverbox = {
+                type: 'scatter', mode: 'markers', x: t, y: d.close,
+                marker: { opacity: 0 },
+                hovertemplate: '<extra></extra>',
+                customdata: d.open.map((o,i)=>[o, d.high[i], d.low[i], d.close[i], d.ema[i], d.ma[i]])
+              };
+              const N = t.length;
+              const stepMs = (N>1) ? (Number(d.time[N-1]) - Number(d.time[N-2])) : 0;
+              const endPadMs = Math.max(60000, Math.floor(stepMs * 0.8));
+              const layout = {
+                margin: { l: 40, r: 60, t: 10, b: 30 },
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                xaxis: {
+                  type: 'date',
+                  rangeslider: { visible: false },
+                  range: (preserveRange && preserveRange.length === 2) ? preserveRange : [t[0], new Date(Number(d.time[N-1]) + endPadMs)],
+                  showspikes: true,
+                  spikethickness: 1,
+                  spikecolor: '#888'
+                },
+                yaxis: { fixedrange: false, side: 'right', tickformat: '.1f', separatethousands: false, automargin: true, ticks: 'outside', showexponent: 'none', exponentformat: 'none' },
+                showlegend: false,
+                legend: { orientation: 'h' },
+                hovermode: 'x',
+                dragmode: 'pan',
+                uirevision: 'kchart',
+              };
+              const config = { scrollZoom: true, displayModeBar: false };
+              Plotly.newPlot('plot_kline', [candle, ema, ma, hoverbox], layout, config);
+              // 更新状态：最早时间与当前范围
+              K_TIMES = t;
+              K_CLOSE = d.close.slice();
+              K_EARLIEST_TS = Number(d.time[0]);
+              LAST_RANGE = layout.xaxis.range;
+              RELOADING = false;
+              // 绑定缩放/拖拽事件：当范围左端早于已加载最早点时自动扩容加载
+              const plot = document.getElementById('plot_kline');
+              const hoverbar = document.getElementById('hoverbar');
+              plot.on('plotly_relayout', (ev) => {
+                try {
+                  const r0 = ev['xaxis.range[0]'] ? new Date(ev['xaxis.range[0]']).getTime() : (Array.isArray(LAST_RANGE) ? new Date(LAST_RANGE[0]).getTime() : null);
+                  const r1 = ev['xaxis.range[1]'] ? new Date(ev['xaxis.range[1]']).getTime() : (Array.isArray(LAST_RANGE) ? new Date(LAST_RANGE[1]).getTime() : null);
+                  if (r0 && r1) {
+                    LAST_RANGE = [new Date(r0), new Date(r1)];
+                    if (r0 < K_EARLIEST_TS && !RELOADING) {
+                      RELOADING = true;
+                      const next = Math.min(K_LIMIT * 2, 2000);
+                      renderChart(next, LAST_RANGE);
+                    }
+                  }
+                } catch (e) { console.warn(e); }
+              });
+              // 顶部悬停信息条：仿截图样式
+              function toTimeStr(dt){
+                const y = dt.getFullYear();
+                const m = String(dt.getMonth()+1).padStart(2,'0');
+                const d2 = String(dt.getDate()).padStart(2,'0');
+                const hh = String(dt.getHours()).padStart(2,'0');
+                const mm = String(dt.getMinutes()).padStart(2,'0');
+                return `${y}/${m}/${d2} ${hh}:${mm}`;
+              }
+              plot.on('plotly_hover', (ev) => {
+                try {
+                  const p = ev.points && ev.points[0];
+                  if (!p) return;
+                  const i = p.pointIndex;
+                  CURRENT_HOVER_INDEX = i;
+                  const ts = t[i];
+                  const o = d.open[i], h = d.high[i], l = d.low[i], c = d.close[i];
+                  const prev = (i>0) ? d.close[i-1] : NaN;
+                  const chg = (isFinite(prev) && prev !== 0) ? ((c - prev) / prev * 100) : NaN;
+                  const amp = (isFinite(o) && o !== 0) ? ((h - l) / o * 100) : NaN;
+                  const chgCls = isFinite(chg) ? (chg>0?'green':(chg<0?'red':'')) : '';
+                  const closeCls = isFinite(c) && isFinite(o) ? (c>o?'green':(c<o?'red':'')) : '';
+                  const emaV = d.ema && Number.isFinite(d.ema[i]) ? d.ema[i] : NaN;
+                  const maV = d.ma && Number.isFinite(d.ma[i]) ? d.ma[i] : NaN;
+                  hoverbar.innerHTML = `
+                    <span>${toTimeStr(ts)}</span>
+                    · 开: <b>${isFinite(o)?o.toFixed(1):'-'}</b>
+                    · 高: <b>${isFinite(h)?h.toFixed(1):'-'}</b>
+                    · 低: <b>${isFinite(l)?l.toFixed(1):'-'}</b>
+                    · 收: <b class="${closeCls}">${isFinite(c)?c.toFixed(1):'-'}</b>
+                    · 涨跌幅: <b class="${chgCls}">${isFinite(chg)?chg.toFixed(2)+'%':'-'}</b>
+                    · 振幅: <b>${isFinite(amp)?amp.toFixed(2)+'%':'-'}</b>
+                    · EMA: <b style="color:#106697">${isFinite(emaV)?emaV.toFixed(1):'-'}</b>
+                    · MA: <b style="color:#f59e0b">${isFinite(maV)?maV.toFixed(1):'-'}</b>
+                  `;
+                  hoverbar.style.display = 'inline-block';
+                } catch(e) { console.warn(e); }
+              });
+              plot.on('plotly_unhover', () => { CURRENT_HOVER_INDEX = null; if (hoverbar) hoverbar.style.display = 'none'; });
+              // 将“BTCUSDT 5m · EMA/MA”移动到标题后面显示
+              const title = document.getElementById('title_kline');
+              if (title) {
+                title.innerHTML = `<span style="font-size:14px;margin-left:8px;color:#0f172a;">
+                  ${d.symbol} ${d.interval} · 
+                  <span style="display:inline-block;width:14px;border-top:2px solid #106697;margin-right:4px;vertical-align:middle;"></span>EMA(${d.ema_period}) · 
+                  <span style="display:inline-block;width:14px;border-top:2px solid #f59e0b;margin-right:4px;vertical-align:middle;"></span>MA(${d.ma_period})
+                </span>`;
+              }
+            } catch (e) { console.error(e); }
+          }
+
           function render(s) {
             const price = s.current_price ? s.current_price.toFixed(1) : '-';
             const ema = s.ema ? s.ema.toFixed(1) : '-';
@@ -503,6 +729,46 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const roiPct = (totals.roi !== undefined && totals.roi !== null) ? (Number(totals.roi) * 100).toFixed(2) + '%' : '-';
             const tpNum = Number(totals.total_pnl);
             const roiNum = Number(totals.roi);
+            // 若当前鼠标悬停在“最后一根未收盘K线”，则用实时数据刷新顶部悬停条
+            try {
+              const hoverbar = document.getElementById('hoverbar');
+              const isHoveringLast = (CURRENT_HOVER_INDEX !== null) && (K_TIMES && K_TIMES.length > 0) && (CURRENT_HOVER_INDEX === K_TIMES.length - 1);
+              if (hoverbar && isHoveringLast) {
+                const k = s.latest_kline || {};
+                const ts = new Date(Number(K_TIMES[CURRENT_HOVER_INDEX]));
+                const o = Number(k.open);
+                const h = Number(k.high);
+                const l = Number(k.low);
+                const c = Number(s.current_price ?? k.close);
+                const prev = (K_CLOSE && K_CLOSE.length >= 2) ? Number(K_CLOSE[K_CLOSE.length - 2]) : NaN;
+                const chg = (isFinite(prev) && prev !== 0) ? ((c - prev) / prev * 100) : NaN;
+                const amp = (isFinite(o) && o !== 0) ? ((h - l) / o * 100) : NaN;
+                const chgCls = isFinite(chg) ? (chg>0?'green':(chg<0?'red':'')) : '';
+                const closeCls = (isFinite(c) && isFinite(o)) ? (c>o?'green':(c<o?'red':'')) : '';
+                const emaV = s.ema;
+                const maV = s.ma;
+                const toTimeStr = (dt)=>{
+                  const y = dt.getFullYear();
+                  const m = String(dt.getMonth()+1).padStart(2,'0');
+                  const d2 = String(dt.getDate()).padStart(2,'0');
+                  const hh = String(dt.getHours()).padStart(2,'0');
+                  const mm = String(dt.getMinutes()).padStart(2,'0');
+                  return `${y}/${m}/${d2} ${hh}:${mm}`;
+                };
+                hoverbar.innerHTML = `
+                  <span>${toTimeStr(ts)}</span>
+                  · 开: <b>${isFinite(o)?o.toFixed(1):'-'}</b>
+                  · 高: <b>${isFinite(h)?h.toFixed(1):'-'}</b>
+                  · 低: <b>${isFinite(l)?l.toFixed(1):'-'}</b>
+                  · 收: <b class="${closeCls}">${isFinite(c)?c.toFixed(1):'-'}</b>
+                  · 涨跌幅: <b class="${chgCls}">${isFinite(chg)?chg.toFixed(2)+'%':'-'}</b>
+                  · 振幅: <b>${isFinite(amp)?amp.toFixed(2)+'%':'-'}</b>
+                  · EMA: <b style="color:#106697">${(emaV!==undefined && emaV!==null && isFinite(Number(emaV)))?Number(emaV).toFixed(1):'-'}</b>
+                  · MA: <b style="color:#f59e0b">${(maV!==undefined && maV!==null && isFinite(Number(maV)))?Number(maV).toFixed(1):'-'}</b>
+                `;
+                hoverbar.style.display = 'inline-block';
+              }
+            } catch (_) {}
             const tpCls = isFinite(tpNum) ? (tpNum>0?'green':(tpNum<0?'red':'')) : '';
             const roiCls = isFinite(roiNum) ? (roiNum>0?'green':(roiNum<0?'red':'')) : '';
             let valCls = '';
@@ -555,7 +821,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             // 不再渲染 (s.recent_klines) 的其它历史行
           }
           // 首屏初始化一次
-          (async () => { const r = await fetch('/status'); const s = await r.json(); render(s); })();
+          (async () => { const r = await fetch('/status'); const s = await r.json(); render(s); renderChart(); })();
           // 订阅服务端事件，实现与 Binance WS 同步节奏的实时更新
           const es = new EventSource('/events/status');
           es.onmessage = (e) => { try { const s = JSON.parse(e.data); render(s); } catch (_) {} };
@@ -587,14 +853,50 @@ def main():
 
     engine = TradingEngine(cfg)
 
-    # 拉取历史 K 线初始化指标
+    # 拉取历史 K 线初始化指标（按照 data_period_days 计算需要的根数）
     client = BinanceClient(base_url=tcfg.get("base_url", "https://fapi.binance.com"))
-    hist = client.get_klines(
-        symbol=tcfg.get("symbol", "BTCUSDT"),
-        interval=tcfg.get("interval", "1m"),
-        limit=200,
-    )
-    engine.ingest_historical(hist)
+    def _per_day(interval: str) -> int:
+        s = str(interval).strip().lower()
+        try:
+            if s.endswith('m'):
+                mins = int(s[:-1])
+                return max(1, (24*60)//mins)
+            if s.endswith('h'):
+                hrs = int(s[:-1])
+                return max(1, 24//hrs)
+            if s.endswith('d'):
+                days = int(s[:-1])
+                return max(1, 1//max(1, days))
+        except Exception:
+            pass
+        return 1440
+    need_days = int(tcfg.get("data_period_days", 7))
+    need = max(200, need_days * _per_day(tcfg.get("interval", "1m")))
+    all_klines: list[dict] = []
+    end_time_ms = None
+    while len(all_klines) < need:
+        chunk = client.get_klines(
+            symbol=tcfg.get("symbol", "BTCUSDT"),
+            interval=tcfg.get("interval", "1m"),
+            limit=min(1000, need - len(all_klines)),
+            end_time_ms=end_time_ms,
+        )
+        if not chunk:
+            break
+        all_klines.extend(chunk)
+        # 下一次向更早时间回溯
+        try:
+            earliest_open = int(chunk[0]["open_time"]) if isinstance(chunk[0], dict) else int(chunk[0][0])
+            end_time_ms = earliest_open - 1
+        except Exception:
+            end_time_ms = None
+            break
+    # 修复历史数据方向：all_klines 先加入“最新”再向过去回溯
+    # 需要取“最近 need 根”并保证时间正序灌入引擎
+    hist_sorted_latest = sorted(all_klines, key=lambda k: int(k["close_time"]))
+    if len(hist_sorted_latest) > need:
+        hist_sorted_latest = hist_sorted_latest[-need:]
+    engine.ingest_historical(hist_sorted_latest)
 
     # 事件队列供前端 SSE 使用
     events_q: queue.Queue = queue.Queue(maxsize=1000)
@@ -611,6 +913,11 @@ def main():
     if enable_poller:
         start_price_poller(engine, client, events_q=events_q)
 
+    # 将完整配置附加到引擎供 /chart 使用（读取 data_period_days）
+    try:
+        engine._config = cfg  # type: ignore[attr-defined]
+    except Exception:
+        pass
     app = create_app(engine, port=wcfg.get("port", 5001), tz_offset=wcfg.get("timezone_offset_hours", 8), events_q=events_q, enable_poller=enable_poller)
     port = int(wcfg.get("port", 5001))
     print(f"Preview URL: http://localhost:{port}/")
