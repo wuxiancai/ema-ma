@@ -384,6 +384,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               padding: 0; /* 取消内边距，去除“胶囊”形态 */
               border-radius: 0; /* 取消圆角 */
             }
+            /* 系统参数配置：值颜色较 key 略深但不过分（仅作用于该卡片） */
+            #cfg code { color: #2f3b59; }
           </style>
         </head>
         <body>
@@ -433,8 +435,12 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const sys = s.sysinfo || {};
             const memLeft = fmtBytes(sys.mem_available_bytes);
             const diskLeft = fmtBytes(sys.disk_free_bytes);
+            const memAvail = Number(sys.mem_available_bytes || 0);
+            const memLeftHtml = memAvail > 0 && memAvail < 100*1024*1024
+              ? `<code class="red" style="font-weight:700">${memLeft}</code>`
+              : `<code>${memLeft}</code>`;
             document.getElementById('meta').innerHTML = `
-              <p>服务器时间: <code>${new Date(s.server_time).toLocaleString()}</code> · CPU <code>${fmtPct(sys.cpu_percent)}</code> · MEM <code>${fmtPct(sys.mem_percent)}</code> 余:<code>${memLeft}</code> · DISK <code>${fmtPct(sys.disk_percent)}</code> 余:<code>${diskLeft}</code></p>
+              <p>服务器时间: <code>${new Date(s.server_time).toLocaleString()}</code> · CPU <code>${fmtPct(sys.cpu_percent)}</code> · MEM <code>${fmtPct(sys.mem_percent)}</code> 余:${memLeftHtml} · DISK <code>${fmtPct(sys.disk_percent)}</code> 余:<code>${diskLeft}</code></p>
             `;
             // 配置汇总（不展示 API 密钥），以单行在“系统参数配置”卡片中显示。
             if (s.config) {
@@ -451,9 +457,15 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                 </p>
               `;
             }
+            const priceHtml = `<b class="green">${price}</b>`;
+            const balDiff = (s.balance !== undefined && s.initial_balance !== undefined)
+              ? (Number(s.balance) - Number(s.initial_balance))
+              : 0;
+            const balCls = balDiff > 0 ? 'green' : (balDiff < 0 ? 'red' : '');
+            const balHtml = `<b class="${balCls}">${bal ?? '-'}</b>`;
             document.getElementById('status').innerHTML = `
-              <p>价格: <b>${price}</b> · EMA(${s.ema_period||'-'}): <b>${ema}</b> · MA(${s.ma_period||'-'}): <b>${ma}</b></p>
-              <p>实时余额: <b>${bal}</b> / 初始保证金: ${s.initial_balance} · 杠杆: ${s.leverage}x · 手续费率: ${(s.fee_rate*100).toFixed(3)}%</p>
+              <p>价格: ${priceHtml} · EMA(${s.ema_period||'-'}): <b>${ema}</b> · MA(${s.ma_period||'-'}): <b>${ma}</b></p>
+              <p>实时余额: ${balHtml} / 初始保证金: ${s.initial_balance} · 杠杆: ${s.leverage}x · 手续费率: ${(s.fee_rate*100).toFixed(3)}%</p>
             `;
             const pos = s.position || {};
             const side = pos.side || '-';
@@ -465,9 +477,19 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const tf = (totals.total_fee !== undefined && totals.total_fee !== null) ? Number(totals.total_fee).toFixed(2) : '-';
             const tc = (totals.trade_count !== undefined && totals.trade_count !== null) ? Number(totals.trade_count) : '-';
             const roiPct = (totals.roi !== undefined && totals.roi !== null) ? (Number(totals.roi) * 100).toFixed(2) + '%' : '-';
+            const tpNum = Number(totals.total_pnl);
+            const roiNum = Number(totals.roi);
+            const tpCls = isFinite(tpNum) ? (tpNum>0?'green':(tpNum<0?'red':'')) : '';
+            const roiCls = isFinite(roiNum) ? (roiNum>0?'green':(roiNum<0?'red':'')) : '';
+            let valCls = '';
+            if (pos.side && pos.entry_price && pos.qty && s.current_price) {
+              const ep = Number(pos.entry_price), cp = Number(s.current_price), q = Number(pos.qty);
+              const openPnl = pos.side === 'LONG' ? (cp - ep) * q : (ep - cp) * q;
+              valCls = openPnl>0 ? 'green' : (openPnl<0 ? 'red' : '');
+            }
             document.getElementById('position').innerHTML = `
-              <p>总盈亏: <b>${tp}</b> · 总利润率: <b>${roiPct}</b> · 总手续费: <b>${tf}</b> · 交易次数: <b>${tc}</b></p>
-              <p>方向: <b>${side}</b> · 开仓价: ${entry} · 数量: ${qty} · 当前价值: ${val}</p>
+              <p>总盈亏: <b class="${tpCls}">${tp}</b> · 总利润率: <b class="${roiCls}">${roiPct}</b> · 总手续费: <b>${tf}</b> · 交易次数: <b>${tc}</b></p>
+              <p>方向: <b>${side}</b> · 开仓价: ${entry} · 数量: ${qty} · 当前价值: <span class="${valCls}">${val}</span></p>
             `;
             const tb = document.querySelector('#trades tbody');
             tb.innerHTML = '';
@@ -483,14 +505,17 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                 ? ((pnlNum / notional) * 100).toFixed(2)
                 : '-';
               const pnl = (t.pnl === null || Number.isNaN(pnlNum)) ? '-' : pnlNum.toFixed(2);
+              const pnlCls = (isFinite(pnlNum) && pnlNum !== 0) ? (pnlNum>0?'green':'red') : '';
+              const rateNum = (isFinite(pnlNum) && isFinite(notional) && notional > 0) ? (pnlNum / notional) : NaN;
+              const rateCls = (isFinite(rateNum) && rateNum !== 0) ? (rateNum>0?'green':'red') : '';
               tb.innerHTML += `<tr>
                 <td>${d}</td>
                 <td>${t.side}</td>
                 <td>${isFinite(price) ? price.toFixed(1) : '-'}</td>
                 <td>${isFinite(qty) ? qty.toFixed(4) : '-'}</td>
                 <td>${isFinite(fee) ? fee.toFixed(2) : '-'}</td>
-                <td>${pnl}</td>
-                <td>${rate === '-' ? '-' : rate + '%'}</td>
+                <td class="${pnlCls}">${pnl}</td>
+                <td class="${rateCls}">${rate === '-' ? '-' : rate + '%'}</td>
               </tr>`;
             });
             const kb = document.querySelector('#klines tbody');
@@ -500,7 +525,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               const k = s.latest_kline;
               // 仅显示时间（时:分:秒），不显示日期
               const d = new Date(k.close_time).toLocaleTimeString();
-              kb.innerHTML += `<tr style="font-weight:600"><td>${d}</td><td>${Number(k.open).toFixed(1)}</td><td>${Number(k.high).toFixed(1)}</td><td>${Number(k.low).toFixed(1)}</td><td>${Number(k.close).toFixed(1)}</td><td>${Number(k.volume||0).toFixed(2)}</td></tr>`;
+              const closeCls = (Number(k.close) > Number(k.open)) ? 'green' : ((Number(k.close) < Number(k.open)) ? 'red' : '');
+              kb.innerHTML += `<tr style="font-weight:600"><td>${d}</td><td>${Number(k.open).toFixed(1)}</td><td>${Number(k.high).toFixed(1)}</td><td>${Number(k.low).toFixed(1)}</td><td class="${closeCls}">${Number(k.close).toFixed(1)}</td><td>${Number(k.volume||0).toFixed(2)}</td></tr>`;
             }
             // 不再渲染 (s.recent_klines) 的其它历史行
           }
