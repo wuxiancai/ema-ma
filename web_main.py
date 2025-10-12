@@ -245,6 +245,9 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               --card-dark: #dec79f;
               /* 最近交易行高用于计算显示 3 行高度 */
               --row-h: 35px;
+              /* 标题字号：标题比原来大 4px，副标题再小 8px */
+              --title-size: 24px;
+              --subtitle-size: calc(var(--title-size) - 16px);
             }
 
             /* 背景：低饱和渐变 + 轻微噪点，素雅不抢眼 */
@@ -270,9 +273,14 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
 
             /* 标题：纯色蓝，不用渐变 */
             h1, h2 { margin: 0 0 8px 0; color: var(--blue); }
-            h1 { font-size: 20px; }
+            h1 { font-size: var(--title-size); line-height: 1.25; }
             h2 { font-size: 18px; }
             .card h2 { text-align: center; }
+            /* 副标题：更小一号、略淡、与主标题间距紧凑 */
+            .subtitle { font-size: var(--subtitle-size); color: rgba(16,102,151,.78); margin: 2px 0 12px 0; }
+            /* 单行标题容器：居中对齐、同一行显示 */
+            .hero { display: flex; justify-content: center; align-items: baseline; gap: 16px; white-space: nowrap; margin: 0 0 8px 0; }
+            .subtitle-inline { font-size: var(--subtitle-size); color: rgba(16,102,151,.78); }
 
             /* 网格布局保持不变，仅调整间距为紧凑视觉 */
             .grid { display: grid; grid-template-columns: repeat(2, minmax(300px, 1fr)); gap: 16px; }
@@ -389,7 +397,10 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
           </style>
         </head>
         <body>
-          <h1>EMA/MA 自动交易系统 · __SYM__ · __INTERVAL__</h1>
+          <div class="hero">
+            <h1>EMA/MA 兑复量化系统 · __SYM__ · __INTERVAL__</h1>
+            <span class="subtitle-inline">兑复相生 · 财富自来 · Power by 无为</span>
+          </div>
           <div id="meta"></div>
           <div class="grid1" style="margin:8px 0 16px 0">
             <div class="card">
