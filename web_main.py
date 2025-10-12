@@ -284,7 +284,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
         <head>
           <meta charset=utf-8>
           <meta name=viewport content="width=device-width, initial-scale=1">
-          <title>EMA/MA 自动交易系统</title>
+          <title>兑复量化系统</title>
           <style>
             :root {
               /* 玻璃主题（参考图2）：温润米色底 + 蓝色标题 */
