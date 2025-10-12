@@ -11,6 +11,7 @@ import json
 import threading
 import time
 from pathlib import Path
+import os
 import re
 from typing import Any
 
@@ -25,22 +26,50 @@ from trading import TradingEngine
 
 
 def load_config() -> dict:
-    """加载配置，默认读取 config.jsonc，并兼容注释。
+    """加载配置（支持 JSONC 注释），兼容 systemd 工作目录与环境变量指定。
 
-    支持的注释形式：
-    - 单行注释：以 // 或 # 开头（行内或整行）
-    - 块注释：/* ... */
-    注意：不支持 JSONC 的“尾逗号”，请勿在最后一项后面加逗号。
+    查找优先级：
+    1) 环境变量 EMA_CONFIG_PATH 指定的绝对文件路径（如果存在则使用）
+    2) 脚本所在目录下的 config.jsonc / config.json
+    3) 当前工作目录下的 config.jsonc / config.json
     """
-    # 优先使用 config.jsonc；若不存在则回退到 config.json
-    cfg_path = Path("config.jsonc") if Path("config.jsonc").exists() else Path("config.json")
+    candidates: list[Path] = []
+    env_path = os.environ.get("EMA_CONFIG_PATH")
+    if env_path:
+        p = Path(env_path).expanduser()
+        candidates.append(p)
+    script_dir = Path(__file__).resolve().parent
+    for name in ("config.jsonc", "config.json"):
+        candidates.append(script_dir / name)
+    cwd = Path.cwd()
+    for name in ("config.jsonc", "config.json"):
+        candidates.append(cwd / name)
+
+    cfg_path: Path | None = None
+    for p in candidates:
+        try:
+            if p.exists() and p.is_file():
+                cfg_path = p
+                break
+        except Exception:
+            pass
+    if cfg_path is None:
+        searched = ", ".join(str(x) for x in candidates)
+        raise FileNotFoundError(f"Config file not found. Searched: {searched}. Set EMA_CONFIG_PATH to override.")
+
     txt = cfg_path.read_text(encoding="utf-8")
     # 去除块注释
     txt = re.sub(r"/\*[\s\S]*?\*/", "", txt)
     # 去除以 // 或 # 开头的行内注释（避免误删 URL 中的 //）
     txt = re.sub(r"(^|\s)//.*$", "", txt, flags=re.MULTILINE)
     txt = re.sub(r"(^|\s)#.*$", "", txt, flags=re.MULTILINE)
-    return json.loads(txt)
+    cfg = json.loads(txt)
+    # 记录使用的配置路径，便于 systemd 日志排查
+    try:
+        print(f"[CONFIG] Using: {cfg_path}")
+    except Exception:
+        pass
+    return cfg
 
 
 def get_sysinfo() -> dict:
