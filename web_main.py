@@ -64,6 +64,10 @@ def get_sysinfo() -> dict:
 def get_config_summary(engine: TradingEngine, tz_offset_hours: int, enable_poller: bool) -> dict:
     """汇总需要在页面展示的配置参数（不含 API 密钥）。"""
     try:
+        # 从完整配置中提取前端展示相关项（如图表高度），若不存在则提供默认值
+        full_cfg = getattr(engine, "_config", {}) or {}
+        wcfg = (full_cfg.get("web") if isinstance(full_cfg, dict) else {}) or {}
+        chart_h = int(wcfg.get("chart_height_px", 420))
         return {
             "trading": {
                 "test_mode": engine.test_mode,
@@ -83,6 +87,7 @@ def get_config_summary(engine: TradingEngine, tz_offset_hours: int, enable_polle
             "web": {
                 "timezone_offset_hours": tz_offset_hours,
                 "enable_price_poller": enable_poller,
+                "chart_height_px": chart_h,
             },
         }
     except Exception:
@@ -284,7 +289,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
         <head>
           <meta charset=utf-8>
           <meta name=viewport content="width=device-width, initial-scale=1">
-          <title>兑复量化系统</title>
+          <title>__INTERVAL__ __SYM__ · 兑复量化系统</title>
           <style>
             :root {
               /* 玻璃主题（参考图2）：温润米色底 + 蓝色标题 */
@@ -529,6 +534,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
           let K_TIMES = [];
           let K_CLOSE = [];
           let CURRENT_HOVER_INDEX = null;
+          // 图表高度（可通过配置调整），默认 260px
+          let CHART_HEIGHT = __CHART_HEIGHT__;
 
           function fmtPct(x){ return (x===undefined||x===null||isNaN(Number(x))) ? '-' : (Number(x).toFixed(1) + '%'); }
           function fmtBytes(b){
@@ -580,11 +587,13 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               };
               const N = t.length;
               const stepMs = (N>1) ? (Number(d.time[N-1]) - Number(d.time[N-2])) : 0;
-              const endPadMs = Math.max(60000, Math.floor(stepMs * 0.8));
+              // 增加更大的右侧时间留白，避免高周期（如4h）最后一根被遮挡
+              const endPadMs = (stepMs > 0) ? Math.floor(stepMs * 1.5) : 7200000; // 至少留 2h
               const layout = {
-                margin: { l: 40, r: 60, t: 10, b: 30 },
+                margin: { l: 20, r: 80, t: 10, b: 30 },
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
+                height: CHART_HEIGHT,
                 xaxis: {
                   type: 'date',
                   rangeslider: { visible: false },
@@ -601,6 +610,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                 uirevision: 'kchart',
               };
               const config = { scrollZoom: true, displayModeBar: false };
+              const el = document.getElementById('plot_kline');
+              if (el) el.style.height = CHART_HEIGHT + 'px';
               Plotly.newPlot('plot_kline', [candle, ema, ma, hoverbox], layout, config);
               // 更新状态：最早时间与当前范围
               K_TIMES = t;
@@ -699,6 +710,12 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               const i = cfg.indicators || {};
               const w = cfg.web || {};
               const fmtBool = (b) => (b ? '开' : '关');
+              // 读取图表高度配置（最小260，最大1200），并应用到下次渲染
+              if (w && Number(w.chart_height_px) > 0) {
+                CHART_HEIGHT = Math.min(1200, Math.max(260, Number(w.chart_height_px)));
+                const el2 = document.getElementById('plot_kline');
+                if (el2) el2.style.height = CHART_HEIGHT + 'px';
+              }
               document.getElementById('cfg').innerHTML = `
                 <p>
                   交易类型: <code>${t.test_mode?'模拟':'实盘'}</code> · 保证金余额:<code>${t.initial_balance}</code> · 开仓比例:<code>${(Number(t.percent)*100).toFixed(0)}%</code> · 杠杆:<code>${t.leverage}x</code> · 手续费率:<code>${(Number(t.fee_rate)*100).toFixed(3)}%</code> · 交易币对:<code>${t.symbol}</code> · ｜ K线周期:<code>${t.interval}</code>
@@ -829,7 +846,13 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
         </body>
         </html>
         """
-        html = html.replace("__SYM__", engine.symbol).replace("__INTERVAL__", engine.interval)
+        try:
+            full_cfg = getattr(engine, "_config", {}) or {}
+            wcfg = (full_cfg.get("web") if isinstance(full_cfg, dict) else {}) or {}
+            ch = int(wcfg.get("chart_height_px", 260))
+        except Exception:
+            ch = 260
+        html = html.replace("__SYM__", engine.symbol).replace("__INTERVAL__", engine.interval).replace("__CHART_HEIGHT__", str(ch))
         return Response(html, mimetype="text/html")
 
     @app.route('/events/status')
