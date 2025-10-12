@@ -484,7 +484,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
           </head>
           <body>
           <div class="hero">
-            <h1>EMA/MA 兑复量化系统 · __SYM__ · __INTERVAL__</h1>
+            <h1>兑复量化系统 · __SYM__ · __INTERVAL__</h1>
             <span class="subtitle-inline">兑复相生 · 财富自来 · Power by 无为</span>
           </div>
           <div id="meta"></div>
