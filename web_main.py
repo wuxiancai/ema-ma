@@ -238,7 +238,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               --text-1: #1f2937;
               --text-2: #4b5563;
               --line: rgba(0,0,0,.10);
-              --blue: #0E4AA8; /* 参考图的深蓝 */
+              --blue: #106697; /* 参考图的深蓝 */
               --card-bg: #f5f4f3; /* 卡片内部底色，统一为页面米色 */
               /* 参考图2卡片内部的斜向暖米色渐变 */
               --card-light: #f2e3c5;
