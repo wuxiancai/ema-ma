@@ -305,6 +305,9 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               border: 0;
             }
 
+            /* 除“最近交易”外，其余卡片左侧略向右收一点 */
+            .card:not(:has(#trades)) { padding-left: 18px; }
+
             /* 顶左高光斑与内圈暗带，增强厚度与高光走向 */
             .card::before {
               content: '';
