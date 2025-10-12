@@ -122,7 +122,7 @@ def start_ws(
         if events_q is not None:
             try:
                 s = engine.status()
-                s["recent_trades"] = engine.recent_trades(5)
+                s["recent_trades"] = engine.recent_trades(50)
                 s["recent_klines"] = engine.recent_klines(5)
                 s["server_time"] = int(time.time() * 1000)
                 # 附带系统信息（CPU/MEM/DISK）
@@ -187,7 +187,7 @@ def start_ws(
                 if events_q is not None:
                     try:
                         s = engine.status()
-                        s["recent_trades"] = engine.recent_trades(5)
+                        s["recent_trades"] = engine.recent_trades(50)
                         s["recent_klines"] = engine.recent_klines(5)
                         s["server_time"] = int(time.time() * 1000)
                         s["sysinfo"] = get_sysinfo()
@@ -211,7 +211,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
     @app.route("/status")
     def api_status():
         s = engine.status()
-        s["recent_trades"] = engine.recent_trades(5)
+        s["recent_trades"] = engine.recent_trades(50)
         s["recent_klines"] = engine.recent_klines(5)
         s["server_time"] = int(time.time() * 1000) + tz_offset * 3600 * 1000
         s["sysinfo"] = get_sysinfo()
@@ -269,7 +269,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             /* 标题：纯色蓝，不用渐变 */
             h1, h2 { margin: 0 0 8px 0; color: var(--blue); }
             h1 { font-size: 20px; }
-            h2 { font-size: 16px; }
+            h2 { font-size: 18px; }
             .card h2 { text-align: center; }
 
             /* 网格布局保持不变，仅调整间距为紧凑视觉 */
@@ -352,6 +352,17 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             thead th { color: var(--text-2); font-weight: 600; }
             th, td { border-bottom: 0; padding: 6px 8px; text-align: left; }
             tbody tr:hover { background: rgba(255,255,255,.04); }
+            /* 最近交易：默认仅显示 3 行，支持滚动查看更多 */
+            #trades { table-layout: fixed; }
+            #trades thead, #trades tbody tr { display: table; width: 100%; table-layout: fixed; }
+            #trades tbody { display: block; max-height: calc(3 * var(--row-h, 36px)); overflow-y: auto; }
+            /* 滚动条默认隐藏，悬停时显示 */
+            #trades tbody { scrollbar-width: none; }
+            #trades tbody:hover { scrollbar-width: thin; }
+            #trades tbody::-webkit-scrollbar { width: 0; height: 0; }
+            #trades tbody:hover::-webkit-scrollbar { width: 8px; height: 8px; }
+            #trades tbody::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 6px; }
+            #trades tbody::-webkit-scrollbar-track { background: rgba(0,0,0,.05); }
 
             /* 盈亏颜色：稍微降低饱和度，保持辨识度 */
             .green { color: #0f766e; }
