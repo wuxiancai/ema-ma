@@ -69,6 +69,8 @@ class TradingEngine:
         # 这样在程序重启后，页面上的“实时余额”不会回到 initial_balance，
         # 而是延续上次运行的结果（例如 970），与累计的总盈亏保持一致。
         self._restore_balance_from_wallet()
+        # 启动时恢复未平仓的持仓信息（保证重启后仍显示当前持仓）
+        self._restore_open_position()
 
     # --------------------- DB ---------------------
     def _init_db(self):
@@ -110,6 +112,19 @@ class TradingEngine:
             )
             """
         )
+        # 记录当前未平仓的持仓，便于程序重启后恢复
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                time INTEGER,
+                side TEXT,
+                entry_price REAL,
+                qty REAL,
+                open_fee REAL
+            )
+            """
+        )
         self._db.commit()
 
     def _restore_balance_from_wallet(self):
@@ -128,6 +143,35 @@ class TradingEngine:
                 self._insert_wallet()
         except Exception:
             # 出现异常时不影响程序继续运行；保留当前内存余额
+            pass
+
+    def _restore_open_position(self):
+        """在程序启动时恢复未平仓持仓。
+
+        优先从 position 表恢复；若为空，则从 trades 表推断：
+        - 找到最近一次开仓记录（LONG/SHORT）；
+        - 若其后不存在 CLOSE 记录，则视为当前仍持仓。
+        """
+        try:
+            cur = self._db.cursor()
+            # 1) 优先读取 position 表最新记录
+            cur.execute("SELECT side, entry_price, qty, open_fee FROM position ORDER BY id DESC LIMIT 1")
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                self.position = Position(side=row[0], entry_price=float(row[1]), qty=float(row[2]), open_fee=float(row[3] or 0.0))
+                return
+
+            # 2) 回退：从 trades 推断是否仍有未平仓
+            cur.execute("SELECT id, side, price, qty, fee FROM trades WHERE side IN ('LONG','SHORT') ORDER BY id DESC LIMIT 1")
+            t = cur.fetchone()
+            if t:
+                last_open_id = int(t[0])
+                # 检查是否存在晚于该开仓记录的平仓记录
+                cur.execute("SELECT COUNT(1) FROM trades WHERE id > ? AND side = 'CLOSE'", (last_open_id,))
+                closed_count = int(cur.fetchone()[0] or 0)
+                if closed_count == 0:
+                    self.position = Position(side=str(t[1]), entry_price=float(t[2]), qty=float(t[3]), open_fee=float(t[4] or 0.0))
+        except Exception:
             pass
 
     def _insert_kline(self, k: dict):
@@ -161,6 +205,29 @@ class TradingEngine:
             (int(time.time() * 1000), self.symbol, side, price, qty, fee, pnl, self.balance),
         )
         self._db.commit()
+
+    def _save_position(self):
+        """将当前未平仓持仓写入 position 表（只追加一条最新记录）。"""
+        try:
+            if self.position.side is None:
+                return
+            cur = self._db.cursor()
+            cur.execute(
+                "INSERT INTO position(time, side, entry_price, qty, open_fee) VALUES (?, ?, ?, ?, ?)",
+                (int(time.time() * 1000), self.position.side, float(self.position.entry_price or 0.0), float(self.position.qty or 0.0), float(self.position.open_fee or 0.0)),
+            )
+            self._db.commit()
+        except Exception:
+            pass
+
+    def _clear_position(self):
+        """清空 position 表（表示当前无未平仓持仓）。"""
+        try:
+            cur = self._db.cursor()
+            cur.execute("DELETE FROM position")
+            self._db.commit()
+        except Exception:
+            pass
 
     def _insert_wallet(self):
         cur = self._db.cursor()
@@ -335,6 +402,9 @@ class TradingEngine:
         self._insert_trade(side, price, qty, fee, pnl=-fee)
         self._insert_wallet()
         self.position = Position(side=side, entry_price=price, qty=qty, open_fee=fee)
+        # 记录未平仓持仓，保证重启后可恢复
+        self._clear_position()
+        self._save_position()
         print(f"[OPEN] {side} price={price:.2f} qty={qty:.6f} fee={fee:.4f} bal={self.balance:.2f}")
 
     def _close_position(self, price: float):
@@ -362,6 +432,8 @@ class TradingEngine:
         self._insert_wallet()
         print(f"[CLOSE] {side} @ {price:.2f} gross_pnl={pnl:.4f} fee_close={fee:.4f} fee_open={open_fee:.4f} net_pnl={net_pnl:.4f} bal={self.balance:.2f}")
         self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
+        # 清除未平仓持仓记录
+        self._clear_position()
 
     # --------------------- Status ---------------------
     def status(self) -> dict:
