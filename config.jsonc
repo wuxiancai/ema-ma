@@ -25,7 +25,7 @@
   // Web 服务配置
   "web": {
     "port": 5001,               // Web 服务端口（本地预览 http://localhost:PORT/）
-    "chart_height_px": 260,     // 图表高度（像素）
+    "chart_height_px": 320,     // 图表高度（像素）
     "timezone_offset_hours": 8, // 页面“服务器时间”显示的时区偏移（小时）
     "enable_price_poller": false // 价格轮询：false=WS 异常时自动回退；true=始终轮询并保持 WS
   }
