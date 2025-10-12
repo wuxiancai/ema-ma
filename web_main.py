@@ -754,13 +754,47 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               `;
             }
             const priceHtml = `<b class="green">${price}</b>`;
+            // 计算当日（UTC+0）00:00 基准价，并基于当前实时价格计算涨幅
+            const nowUtc = new Date(s.server_time || Date.now());
+            const dayStartMs = Date.UTC(
+              nowUtc.getUTCFullYear(),
+              nowUtc.getUTCMonth(),
+              nowUtc.getUTCDate(),
+              0, 0, 0, 0
+            );
+            let dayBase = NaN;
+            try {
+              if (Array.isArray(K_TIMES) && Array.isArray(K_CLOSE) && K_TIMES.length && K_CLOSE.length) {
+                let idx = -1;
+                // 优先取 dayStart 当时或之前最近一根的收盘价
+                for (let i = K_TIMES.length - 1; i >= 0; i--) {
+                  const ts = Number(K_TIMES[i]);
+                  if (ts <= dayStartMs) { idx = i; break; }
+                }
+                // 如果之前没有，则取 dayStart 之后第一根的收盘价
+                if (idx < 0) {
+                  for (let i = 0; i < K_TIMES.length; i++) {
+                    const ts = Number(K_TIMES[i]);
+                    if (ts >= dayStartMs) { idx = i; break; }
+                  }
+                }
+                if (idx >= 0 && isFinite(Number(K_CLOSE[idx]))) {
+                  dayBase = Number(K_CLOSE[idx]);
+                }
+              }
+            } catch (_) {}
+            const dayChg = (isFinite(dayBase) && dayBase !== 0 && isFinite(Number(s.current_price)))
+              ? ((Number(s.current_price) - dayBase) / dayBase * 100)
+              : NaN;
+            const dayChgCls = isFinite(dayChg) ? (dayChg > 0 ? 'green' : (dayChg < 0 ? 'red' : '')) : '';
+            const dayChgHtml = `<b class="${dayChgCls}">${isFinite(dayChg)?dayChg.toFixed(1)+'%':'-'}</b>`;
             const balDiff = (s.balance !== undefined && s.initial_balance !== undefined)
               ? (Number(s.balance) - Number(s.initial_balance))
               : 0;
             const balCls = balDiff > 0 ? 'green' : (balDiff < 0 ? 'red' : '');
             const balHtml = `<b class="${balCls}">${bal ?? '-'}</b>`;
             document.getElementById('status').innerHTML = `
-              <p>价格: ${priceHtml} · EMA(${s.ema_period||'-'}): <b>${ema}</b> · MA(${s.ma_period||'-'}): <b>${ma}</b></p>
+              <p>价格: ${priceHtml} · 涨幅: ${dayChgHtml} · EMA(${s.ema_period||'-'}): <b>${ema}</b> · MA(${s.ma_period||'-'}): <b>${ma}</b></p>
               <p>实时余额: ${balHtml} / 初始保证金: ${s.initial_balance} · 杠杆: ${s.leverage}x · 手续费率: ${(s.fee_rate*100).toFixed(3)}%</p>
             `;
             const pos = s.position || {};
