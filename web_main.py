@@ -362,7 +362,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             /* 实时K线卡片中的系统信息（位于表格下方的一行） */
             .kmeta {
               color: var(--text-2);
-              font-size: 14px;
+              font-size: 16px; /* 与K线表格数值一致 */
               margin: 8px 0 0 0;
               display: flex;
               align-items: center;
