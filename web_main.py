@@ -359,6 +359,17 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
 
             /* 文本与分隔线：更柔和、素雅 */
             p { color: var(--text-2); margin: 0 0 8px 0; }
+            /* 实时K线卡片中的系统信息（位于表格下方的一行） */
+            .kmeta {
+              color: var(--text-2);
+              font-size: 14px;
+              margin: 8px 0 0 0;
+              display: flex;
+              align-items: center;
+              gap: 8px;
+            }
+            .kmeta .left { margin-left: 12px; }
+            .kmeta .right { margin-left: auto; text-align: right; margin-right: 12px; }
 
             /* 表格：极细边与行悬停微亮 */
             table { width: 100%; border-collapse: collapse; border: 0; }
@@ -424,6 +435,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             <div class="card">
               <h2>实时 K 线</h2>
               <table id="klines"><thead><tr><th>收盘时间</th><th>开</th><th>高</th><th>低</th><th>收</th><th>量</th></tr></thead><tbody></tbody></table>
+              <div id="kmeta" class="kmeta"></div>
             </div>
           </div>
           <script>
@@ -450,8 +462,9 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const memLeftHtml = memAvail > 0 && memAvail < 100*1024*1024
               ? `<code class="red" style="font-weight:700">${memLeft}</code>`
               : `<code>${memLeft}</code>`;
-            document.getElementById('meta').innerHTML = `
-              <p>服务器时间: <code>${new Date(s.server_time).toLocaleString()}</code> · CPU <code>${fmtPct(sys.cpu_percent)}</code> · MEM <code>${fmtPct(sys.mem_percent)}</code> 余:${memLeftHtml} · DISK <code>${fmtPct(sys.disk_percent)}</code> 余:<code>${diskLeft}</code></p>
+            document.getElementById('kmeta').innerHTML = `
+              <div class="left">⏰ 服务器时间: <code>${new Date(s.server_time).toLocaleString()}</code></div>
+              <div class="right">⚙️ CPU <code>${fmtPct(sys.cpu_percent)}</code> · 内存余:${memLeftHtml} · 磁盘余:<code>${diskLeft}</code></div>
             `;
             // 配置汇总（不展示 API 密钥），以单行在“系统参数配置”卡片中显示。
             if (s.config) {
