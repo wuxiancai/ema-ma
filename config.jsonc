@@ -3,20 +3,22 @@
   "trading": {
     "api_key": "yHEbiLZVNTpX81Vc6UYPJpIsPFa6P461R1OVHHq7JcLs60B4GPcVSEq7Chw8OCGG",             // 币安 API Key（仅真实交易时使用）
     "secret_key": "gwbbkf4uCPTJbMH6M3QZFJ4qtkqqzasg28vVZb20nkWwe7kDCZsSRSMjidHCb3Th",          // 币安 Secret Key（与 api_key 配对）
-    "test_mode": true,          // 模拟交易开关：true=仅本地计算盈亏，不下真实单
+    "test_mode": false,          // 模拟交易开关：true=仅本地计算盈亏，不下真实单
     "initial_balance": 1000.0,  // 初始资金（USDT，仅模拟模式）
     "percent": 0.5,             // 每次开仓使用当前余额比例（0~1），如 0.5=50%
     "leverage": 10,             // 杠杆倍数，例如 10 表示 10x
     "fee_rate": 0.0005,         // 手续费率（开/平仓均按名义金额×该费率）
     "symbol": "BTCUSDT",       // 交易对（如 BTCUSDT / ETHUSDT）
-    "interval": "5m",          // K 线周期：1m/5m/15m/1h 等
+    "interval": "1m",          // K 线周期：1m/5m/15m/1h 等
     "data_period_days": 7,      // 启动时拉取的历史数据天数（用于初始化指标）
-    "base_url": "https://fapi.binance.com" // 币安合约 API 基础 URL
+    "base_url": "https://fapi.binance.com", // 币安合约 API 基础 URL
+    "enable_tick_log": false,            // 是否打印高频 [TICK] 日志（默认关闭）
+    "enable_signal_debug_log": true     // 是否打印开仓信号调试日志（默认关闭）
   },
 
   // 指标参数（均线与信号判断）
   "indicators": {
-    "ema_period": 10,            // EMA 周期长度
+    "ema_period": 5,            // EMA 周期长度
     "ma_period": 50,            // MA 周期长度
     "use_closed_only": true,    // 指标计算仅使用已收盘K线：true更稳健；false更灵敏
     "use_slope": false          // 是否将 EMA 斜率（上升/下降趋势）纳入开仓条件；false=关闭斜率约束
@@ -24,7 +26,7 @@
 
   // Web 服务配置
   "web": {
-    "port": 5001,               // Web 服务端口（本地预览 http://localhost:PORT/）
+    "port": 5003,               // Web 服务端口（本地预览 http://localhost:PORT/）
     "chart_height_px": 320,     // 图表高度（像素）
     "timezone_offset_hours": 8, // 页面“服务器时间”显示的时区偏移（小时）
     "enable_price_poller": false // 价格轮询：false=WS 异常时自动回退；true=始终轮询并保持 WS

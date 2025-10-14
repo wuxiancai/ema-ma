@@ -15,8 +15,10 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Optional
+import math
 
 from indicators import ema, sma, crossover, is_rising
+from binance_client import BinanceClient
 
 
 @dataclass
@@ -34,12 +36,16 @@ class TradingEngine:
 
         self.symbol = tcfg.get("symbol", "BTCUSDT").upper()
         self.interval = tcfg.get("interval", "1m")
+        # 初始保证金：默认使用配置；若为实盘模式且提供密钥，则从合约账户余额获取
         self.initial_balance = float(tcfg.get("initial_balance", 1000.0))
         self.balance = self.initial_balance
         self.percent = float(tcfg.get("percent", 0.5))
         self.leverage = int(tcfg.get("leverage", 10))
         self.fee_rate = float(tcfg.get("fee_rate", 0.0005))
         self.test_mode = bool(tcfg.get("test_mode", True))
+        # 日志控制：关闭高频 [TICK] 与信号调试日志，避免刷屏
+        self.enable_tick_log: bool = bool(tcfg.get("enable_tick_log", False))
+        self.enable_signal_debug_log: bool = bool(tcfg.get("enable_signal_debug_log", False))
 
         self.ema_period = int(icfg.get("ema_period", 5))
         self.ma_period = int(icfg.get("ma_period", 15))
@@ -58,6 +64,70 @@ class TradingEngine:
         self.use_closed_only: bool = bool(icfg.get("use_closed_only", True))
         # 是否将 EMA/MA 斜率（趋势）纳入开仓条件
         self.use_slope: bool = bool(icfg.get("use_slope", True))
+
+        # 若为实盘：
+        # - 初始保证金 = 合约总保证金余额（wallet + 未实现盈亏）
+        # - 实时余额 = 合约总钱包余额（wallet）
+        # 实盘账户信息与下单客户端
+        self._client_auth: BinanceClient | None = None
+        self._step_size: float = 0.001  # 默认步进（BTCUSDT 通常为 0.001）
+        self._dual_side: bool = False   # 是否开启双向持仓（Hedge Mode）
+        self._min_qty: float | None = None  # 交易对最小数量（LOT_SIZE.minQty 或 MARKET_LOT_SIZE.minQty）
+        self._min_notional: float | None = None  # 交易对最小名义金额（MIN_NOTIONAL.minNotional）
+        try:
+            if not self.test_mode:
+                api_key = str(tcfg.get("api_key") or "")
+                secret_key = str(tcfg.get("secret_key") or "")
+                base_url = str(tcfg.get("base_url") or "https://fapi.binance.com")
+                if api_key and secret_key:
+                    self._client_auth = BinanceClient(base_url=base_url, api_key=api_key, secret_key=secret_key)
+                    totals = self._client_auth.get_futures_account_totals()
+                    if totals:
+                        twb = totals.get("totalWalletBalance")
+                        tmb = totals.get("totalMarginBalance")
+                        if tmb is not None:
+                            self.initial_balance = float(tmb)
+                        if twb is not None:
+                            self.balance = float(twb)
+                    else:
+                        # 回退：若 totals 不可用，则以资产余额作为钱包余额
+                        bal = self._client_auth.get_futures_balance(asset="USDT")
+                        if bal is not None and bal >= 0:
+                            self.balance = float(bal)
+                    # 初始化交易参数：杠杆与数量步进
+                    try:
+                        self._client_auth.set_leverage(self.symbol, self.leverage)
+                    except Exception:
+                        pass
+                    try:
+                        # 优先一次性查询完整过滤器，包含步进、最小数量与最小名义
+                        filters = self._client_auth.get_symbol_filters(self.symbol) if self._client_auth else None
+                        if isinstance(filters, dict):
+                            step = filters.get("stepSize")
+                            if isinstance(step, (int, float)) and step > 0:
+                                self._step_size = float(step)
+                            mq = filters.get("marketMinQty") or filters.get("minQty")
+                            if isinstance(mq, (int, float)) and mq > 0:
+                                self._min_qty = float(mq)
+                            mn = filters.get("minNotional")
+                            if isinstance(mn, (int, float)) and mn > 0:
+                                self._min_notional = float(mn)
+                        else:
+                            # 回退：只查询步进
+                            step = self._client_auth.get_symbol_step_size(self.symbol)
+                            if isinstance(step, float) and step > 0:
+                                self._step_size = step
+                    except Exception:
+                        pass
+                    try:
+                        ds = self._client_auth.get_position_side_dual()
+                        if isinstance(ds, bool):
+                            self._dual_side = ds
+                    except Exception:
+                        pass
+        except Exception:
+            # 保持稳健：异常时保留配置中的初始值
+            pass
 
         # DB
         self.db_path = os.path.join("db", "trading.db")
@@ -128,21 +198,32 @@ class TradingEngine:
         self._db.commit()
 
     def _restore_balance_from_wallet(self):
-        """在程序启动时恢复余额：
+        """在程序启动时恢复余额。
+
+        模拟模式：
         - 若 wallet 表存在记录，则将引擎余额设为最近一条记录的余额；
-        - 若不存在记录，则将当前余额（initial_balance）写入 wallet，作为基准起点。
+        - 若不存在记录，则将当前余额写入 wallet，作为基准起点。
+
+        实盘模式：
+        - 跳过从 wallet 表恢复，保留已从 API 获取的实时余额；
+        - 若 wallet 表为空，则将当前余额写入 wallet 作为首个快照。
         """
         try:
             cur = self._db.cursor()
-            cur.execute("SELECT balance FROM wallet ORDER BY id DESC LIMIT 1")
-            row = cur.fetchone()
-            if row and row[0] is not None:
-                self.balance = float(row[0])
+            if self.test_mode:
+                cur.execute("SELECT balance FROM wallet ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    self.balance = float(row[0])
+                else:
+                    self._insert_wallet()
             else:
-                # 数据库首次初始化：记录初始余额，便于后续累计统计
-                self._insert_wallet()
+                # 实盘：仅在 wallet 为空时写入当前（来自 API）余额
+                cur.execute("SELECT COUNT(1) FROM wallet")
+                cnt = int(cur.fetchone()[0] or 0)
+                if cnt == 0:
+                    self._insert_wallet()
         except Exception:
-            # 出现异常时不影响程序继续运行；保留当前内存余额
             pass
 
     def _restore_open_position(self):
@@ -339,10 +420,11 @@ class TradingEngine:
             return
 
         # 轻量日志，便于观察实时更新
-        try:
-            print(f"[TICK] price={price:.2f} ema={ema_curr:.2f} ma={ma_curr:.2f} cross(g={cross.golden_cross}, d={cross.death_cross})")
-        except Exception:
-            pass
+        if self.enable_tick_log:
+            try:
+                print(f"[TICK] price={price:.2f} ema={ema_curr:.2f} ma={ma_curr:.2f} cross(g={cross.golden_cross}, d={cross.death_cross})")
+            except Exception:
+                pass
 
         if self.position.side is None:
             # 开仓逻辑（记录每个条件，便于对比 Binance 图表）
@@ -351,14 +433,16 @@ class TradingEngine:
             cond_long = cross.golden_cross and price > ema_curr and ema_curr > ma_curr and slope_ok_long
             cond_short = cross.death_cross and price < ema_curr and ema_curr < ma_curr and slope_ok_short
             if cond_long:
-                print(f"[OPEN-CHECK] LONG ok: price>{ema_curr:.2f} ema>{ma_curr:.2f} rising={ema_rising} slope_on={self.use_slope}")
+                if self.enable_signal_debug_log:
+                    print(f"[OPEN-CHECK] LONG ok: price>{ema_curr:.2f} ema>{ma_curr:.2f} rising={ema_rising} slope_on={self.use_slope}")
                 self._open_position("LONG", price)
-            elif cross.golden_cross:
+            elif cross.golden_cross and self.enable_signal_debug_log:
                 print(f"[OPEN-CHECK] LONG miss: price>{ema_curr:.2f}={price>ema_curr} ema>{ma_curr:.2f}={ema_curr>ma_curr} rising={ema_rising} slope_on={self.use_slope}")
             if cond_short:
-                print(f"[OPEN-CHECK] SHORT ok: price<{ema_curr:.2f} ema<{ma_curr:.2f} rising={ema_rising} slope_on={self.use_slope}")
+                if self.enable_signal_debug_log:
+                    print(f"[OPEN-CHECK] SHORT ok: price<{ema_curr:.2f} ema<{ma_curr:.2f} rising={ema_rising} slope_on={self.use_slope}")
                 self._open_position("SHORT", price)
-            elif cross.death_cross:
+            elif cross.death_cross and self.enable_signal_debug_log:
                 print(f"[OPEN-CHECK] SHORT miss: price<{ema_curr:.2f}={price<ema_curr} ema<{ma_curr:.2f}={ema_curr<ma_curr} rising={ema_rising} slope_on={self.use_slope}")
         else:
             # 平仓逻辑
@@ -373,14 +457,26 @@ class TradingEngine:
             #    - 说明：use_closed_only=true 时，交叉仅在收盘触发；false 时，未收盘也可能触发，频次更高。
             if self.position.side == "LONG":
                 if cross.death_cross:
-                    # 死叉：平多，并在同事件反向开空
-                    self._close_position(price)
-                    self._open_position("SHORT", price)
+                    # 死叉：先平多，若平仓成功再反向开空
+                    closed = self._close_position(price)
+                    if closed:
+                        self._open_position("SHORT", price)
+                    else:
+                        try:
+                            print("[CLOSE->OPEN] skipped reverse open due to close failure")
+                        except Exception:
+                            pass
             elif self.position.side == "SHORT":
                 if cross.golden_cross:
-                    # 金叉：平空，并在同事件反向开多
-                    self._close_position(price)
-                    self._open_position("LONG", price)
+                    # 金叉：先平空，若平仓成功再反向开多
+                    closed = self._close_position(price)
+                    if closed:
+                        self._open_position("LONG", price)
+                    else:
+                        try:
+                            print("[CLOSE->OPEN] skipped reverse open due to close failure")
+                        except Exception:
+                            pass
 
         # 收盘时落库
         if bool(k.get("is_final", False)):
@@ -388,63 +484,208 @@ class TradingEngine:
 
     # --------------------- Trading Logic ---------------------
     def _notional_and_qty(self, price: float) -> tuple[float, float]:
-        # 每次开仓金额 = 当前余额 * percent
-        base_amount = self.balance * self.percent
+        # 每次开仓金额 = 保证金余额 * 开仓比例 * 杠杆
+        # 说明：用户要求以“保证金余额”（totalMarginBalance）为基准，而非钱包余额。
+        base_amount = self.initial_balance * self.percent
         notional = base_amount * self.leverage
         qty = notional / price
+        # 步进对齐工具
+        def floor_to_step(x: float, step: float) -> float:
+            return (math.floor(x / step)) * step
+        def ceil_to_step(x: float, step: float) -> float:
+            return (math.ceil(x / step)) * step
+        # 1) 先按步进向下取整，避免 LOT_SIZE 步进拒单
+        try:
+            step = float(self._step_size or 0.001)
+            if step > 0:
+                qty = floor_to_step(qty, step)
+        except Exception:
+            pass
+        # 2) 满足最小数量要求（LOT_SIZE/MARKET_LOT_SIZE）
+        try:
+            if isinstance(self._min_qty, (int, float)) and (self._min_qty or 0) > 0:
+                step = float(self._step_size or 0.001)
+                if qty < float(self._min_qty):
+                    qty = ceil_to_step(float(self._min_qty), step)
+        except Exception:
+            pass
+        # 3) 满足最小名义（MIN_NOTIONAL）：名义=价格×数量
+        try:
+            if isinstance(self._min_notional, (int, float)) and (self._min_notional or 0) > 0:
+                step = float(self._step_size or 0.001)
+                if (price * qty) < float(self._min_notional):
+                    need_qty = float(self._min_notional) / price
+                    qty = ceil_to_step(need_qty, step)
+        except Exception:
+            pass
         return notional, qty
 
     def _open_position(self, side: str, price: float):
         notional, qty = self._notional_and_qty(price)
-        fee = notional * self.fee_rate
+        exec_price = price
+        exec_qty = qty
+        # 实盘：发送市价单
+        if (not self.test_mode) and self._client_auth:
+            try:
+                order_side = "BUY" if side == "LONG" else "SELL"
+                # 双向持仓传 LONG/SHORT；单向持仓不传 positionSide
+                pos_side = ("LONG" if (self._dual_side and side == "LONG") else ("SHORT" if (self._dual_side and side == "SHORT") else None))
+                print(f"[ORDER-OPEN] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side}")
+                res = self._client_auth.create_futures_market_order(
+                    self.symbol,
+                    order_side,
+                    quantity=round(qty, 6),
+                    reduce_only=False,
+                    position_side=pos_side,
+                    new_order_resp_type="RESULT",
+                )
+                order_success = False
+                if isinstance(res, dict):
+                    if res.get("error"):
+                        print(f"[ORDER-OPEN] error: {res}")
+                    else:
+                        avg_price = res.get("avgPrice")
+                        cum_qty = res.get("cumQty") or res.get("executedQty")
+                        status = res.get("status")
+                        if avg_price is not None:
+                            exec_price = float(avg_price)
+                        if cum_qty is not None:
+                            exec_qty = float(cum_qty)
+                        # 成功条件：有成交数量或状态为 FILLED
+                        if (cum_qty is not None and float(cum_qty) > 0) or str(status).upper() == "FILLED":
+                            order_success = True
+                        print(f"[ORDER-OPEN] resp status={status} avgPrice={avg_price} executedQty={cum_qty}")
+                else:
+                    print("[ORDER-OPEN] failed: no response")
+                # 若实盘下单失败，则不更新本地持仓与余额
+                if not order_success:
+                    print("[OPEN] skipped local position update due to order failure")
+                    return
+            except Exception as e:
+                try:
+                    print(f"[ORDER-OPEN] exception during placing order: {e}")
+                except Exception:
+                    print("[ORDER-OPEN] exception during placing order")
+                # 异常同样跳过本地更新
+                return
+        fee = (exec_price * exec_qty * self.leverage) * self.fee_rate / self.leverage  # 近似开仓手续费
         self.balance -= fee
-        # 开仓盈亏应体现手续费（负数）
-        self._insert_trade(side, price, qty, fee, pnl=-fee)
+        self._insert_trade(side, exec_price, exec_qty, fee, pnl=-fee)
         self._insert_wallet()
-        self.position = Position(side=side, entry_price=price, qty=qty, open_fee=fee)
+        self.position = Position(side=side, entry_price=exec_price, qty=exec_qty, open_fee=fee)
         # 记录未平仓持仓，保证重启后可恢复
         self._clear_position()
         self._save_position()
-        print(f"[OPEN] {side} price={price:.2f} qty={qty:.6f} fee={fee:.4f} bal={self.balance:.2f}")
+        print(f"[OPEN] {side} price={exec_price:.2f} qty={exec_qty:.6f} fee={fee:.4f} bal={self.balance:.2f}")
 
-    def _close_position(self, price: float):
+    def _close_position(self, price: float) -> bool:
         if self.position.side is None or self.position.entry_price is None or self.position.qty is None:
-            return
+            return False
         side = self.position.side
         entry = float(self.position.entry_price)
         qty = float(self.position.qty)
         open_fee = float(self.position.open_fee or 0.0)
 
+        exec_price = price
+        exec_qty = qty
+        # 实盘：发送减仓市价单
+        if (not self.test_mode) and self._client_auth:
+            try:
+                order_side = "SELL" if side == "LONG" else "BUY"
+                pos_side = ("LONG" if (self._dual_side and side == "LONG") else ("SHORT" if (self._dual_side and side == "SHORT") else None))
+                print(f"[ORDER-CLOSE] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side}")
+                res = self._client_auth.create_futures_market_order(
+                    self.symbol,
+                    order_side,
+                    quantity=round(qty, 6),
+                    reduce_only=True,
+                    position_side=pos_side,
+                    new_order_resp_type="RESULT",
+                )
+                order_success = False
+                if isinstance(res, dict):
+                    if res.get("error"):
+                        print(f"[ORDER-CLOSE] error: {res}")
+                    else:
+                        avg_price = res.get("avgPrice")
+                        cum_qty = res.get("cumQty") or res.get("executedQty")
+                        status = res.get("status")
+                        if avg_price is not None:
+                            exec_price = float(avg_price)
+                        if cum_qty is not None:
+                            exec_qty = float(cum_qty)
+                        if (cum_qty is not None and float(cum_qty) > 0) or str(status).upper() == "FILLED":
+                            order_success = True
+                        print(f"[ORDER-CLOSE] resp status={status} avgPrice={avg_price} executedQty={cum_qty}")
+                else:
+                    print("[ORDER-CLOSE] failed: no response")
+                if not order_success:
+                    print("[CLOSE] skipped local position update due to order failure")
+                    return False
+            except Exception as e:
+                try:
+                    print(f"[ORDER-CLOSE] exception during placing order: {e}")
+                except Exception:
+                    print("[ORDER-CLOSE] exception during placing order")
+                return False
+
         pnl = 0.0
         if side == "LONG":
-            pnl = (price - entry) * qty
+            pnl = (exec_price - entry) * exec_qty
         elif side == "SHORT":
-            pnl = (entry - price) * qty
+            pnl = (entry - exec_price) * exec_qty
 
-        notional = price * qty
+        notional = exec_price * exec_qty
         fee = notional * self.fee_rate
         # 账户余额只变动价格差与当次手续费；开仓手续费已在开仓时扣除
         self.balance += pnl
         self.balance -= fee
         # 记录净盈亏：价格差 - 平仓手续费 - 开仓手续费
         net_pnl = pnl - fee - open_fee
-        self._insert_trade("CLOSE", price, qty, fee, net_pnl)
+        self._insert_trade("CLOSE", exec_price, exec_qty, fee, net_pnl)
         self._insert_wallet()
-        print(f"[CLOSE] {side} @ {price:.2f} gross_pnl={pnl:.4f} fee_close={fee:.4f} fee_open={open_fee:.4f} net_pnl={net_pnl:.4f} bal={self.balance:.2f}")
+        print(f"[CLOSE] {side} @ {exec_price:.2f} gross_pnl={pnl:.4f} fee_close={fee:.4f} fee_open={open_fee:.4f} net_pnl={net_pnl:.4f} bal={self.balance:.2f}")
         self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
         # 清除未平仓持仓记录
         self._clear_position()
+        return True
 
     # --------------------- Status ---------------------
     def status(self) -> dict:
-        pos_val = 0.0
-        if self.position.side and self.current_price and self.position.qty:
-            if self.position.side == "LONG":
-                pos_val = self.position.qty * self.current_price
+        # 默认使用本地持仓；若有 API 密钥，优先使用交易所真实持仓
+        real_pos: dict | None = None
+        try:
+            if (not self.test_mode) and self._client_auth:
+                real_pos = self._client_auth.get_futures_position(self.symbol)
+        except Exception:
+            real_pos = None
+
+        # 组装持仓信息
+        side = self.position.side
+        entry_price = self.position.entry_price
+        qty_coin = self.position.qty
+        pos_margin = None
+        if isinstance(real_pos, dict) and real_pos.get("positionAmt") is not None:
+            amt = float(real_pos.get("positionAmt"))
+            qty_coin = abs(amt)
+            entry_price = float(real_pos.get("entryPrice") or (entry_price or 0.0)) or None
+            # 推断方向（单向模式下 BOTH 用数量正负判断）
+            if amt > 0:
+                side = "LONG"
+            elif amt < 0:
+                side = "SHORT"
             else:
-                pos_val = self.position.qty * self.current_price
+                side = None
+            m = real_pos.get("margin")
+            if isinstance(m, (int, float)):
+                pos_margin = float(m)
+        # 当前持仓名义（用于“数量: USDT”显示）
+        pos_val = 0.0
+        if qty_coin and self.current_price:
+            pos_val = float(qty_coin) * float(self.current_price)
+
         latest_kline = self.latest_kline
-        return {
+        out = {
             "symbol": self.symbol,
             "interval": self.interval,
             "balance": round(self.balance, 4),
@@ -459,13 +700,17 @@ class TradingEngine:
             "ema_period": self.ema_period,
             "ma_period": self.ma_period,
             "position": {
-                "side": self.position.side,
-                "entry_price": self.position.entry_price,
-                "qty": self.position.qty,
+                "side": side,
+                "entry_price": entry_price,
+                "qty": qty_coin,
                 "value": pos_val,
+                # 供前端显示 Binance UI 的“数量(USDT)”与“保证金(USDT)”
+                "api_qty_usdt": pos_val if (qty_coin and self.current_price) else None,
+                "margin_usdt": pos_margin,
             },
             "latest_kline": latest_kline,
         }
+        return out
 
     def recent_trades(self, limit: int = 5) -> list[dict]:
         cur = self._db.cursor()

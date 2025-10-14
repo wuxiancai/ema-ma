@@ -239,6 +239,44 @@ def start_ws(
     th.start()
     return stop_flag
 
+    def start_account_poller(engine: TradingEngine, client: BinanceClient, events_q: queue.Queue | None = None):
+      """轮询账户总览（合约），定期更新钱包余额与保证金余额。
+
+      每 5 秒获取一次 /fapi/v2/account，总钱包余额 -> s.balance，总保证金余额 -> s.initial_balance。
+      """
+    stop_flag = threading.Event()
+
+    def run():
+        while not stop_flag.is_set():
+            try:
+                totals = client.get_futures_account_totals()
+                if totals:
+                    twb = totals.get("totalWalletBalance")
+                    tmb = totals.get("totalMarginBalance")
+                    if tmb is not None:
+                        engine.initial_balance = float(tmb)
+                    if twb is not None:
+                        engine.balance = float(twb)
+                    # 推送状态到前端
+                    if events_q is not None:
+                        try:
+                            s = engine.status()
+                            s["recent_trades"] = engine.recent_trades(50)
+                            s["recent_klines"] = engine.recent_klines(5)
+                            s["server_time"] = int(time.time() * 1000)
+                            s["sysinfo"] = get_sysinfo()
+                            s["totals"] = engine.totals()
+                            events_q.put_nowait(s)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            time.sleep(5)
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return stop_flag
+
 
 def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue.Queue, *, enable_poller: bool):
     app = Flask(__name__)
@@ -558,6 +596,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
           let K_LIMIT = 100;
           let K_EARLIEST_TS = null;
           let LAST_RANGE = null;
+          let LAST_K_TS = null;        // 最近一次渲染的最新K线收盘时间
+          let LAST_CHART_UPDATE_MS = 0; // 简单节流，避免过于频繁刷新图表
           let RELOADING = false;
           // 悬停与最新 K 线的实时刷新所需的全局状态
           let K_TIMES = [];
@@ -747,8 +787,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               }
               document.getElementById('cfg').innerHTML = `
                 <p>
-                  交易类型: <code>${t.test_mode?'模拟':'实盘'}</code> · 保证金余额:<code>${t.initial_balance}</code> · 开仓比例:<code>${(Number(t.percent)*100).toFixed(0)}%</code> · 杠杆:<code>${t.leverage}x</code> · 手续费率:<code>${(Number(t.fee_rate)*100).toFixed(3)}%</code> · 交易币对:<code>${t.symbol}</code> · ｜ K线周期:<code>${t.interval}</code>
-                  指标: EMA<code>${i.ema_period}</code> · MA<code>${i.ma_period}</code> · K线收盘后交易:<code>${fmtBool(i.use_closed_only)}</code> · EMA/MA斜率约束:<code>${fmtBool(i.use_slope)}</code> · 价格轮询:<code>${fmtBool(w.enable_price_poller)}</code>
+                  交易类型: <code>${t.test_mode?'模拟':'实盘'}</code> · 开仓比例:<code>${(Number(t.percent)*100).toFixed(0)}%</code> · 杠杆:<code>${t.leverage}x</code> · 手续费率:<code>${(Number(t.fee_rate)*100).toFixed(3)}%</code> · K线周期:<code>${t.interval}</code>
+                  指标: EMA<code>${i.ema_period}</code> · MA<code>${i.ma_period}</code> · K线收盘后交易:<code>${fmtBool(i.use_closed_only)}</code>
                   当前显示时区:<code>UTC+${w.timezone_offset_hours||0}</code>
                 </p>
               `;
@@ -789,18 +829,25 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const dayChgCls = isFinite(dayChg) ? (dayChg > 0 ? 'green' : (dayChg < 0 ? 'red' : '')) : '';
             const dayChgHtml = `<b class="${dayChgCls}">${isFinite(dayChg)?dayChg.toFixed(1)+'%':'-'}</b>`;
             const balDiff = (s.balance !== undefined && s.initial_balance !== undefined)
-              ? (Number(s.balance) - Number(s.initial_balance))
+              ? (Number(s.initial_balance) - Number(s.balance))
               : 0;
             const balCls = balDiff > 0 ? 'green' : (balDiff < 0 ? 'red' : '');
-            const balHtml = `<b class="${balCls}">${bal ?? '-'}</b>`;
-            document.getElementById('status').innerHTML = `
-              <p>价格: ${priceHtml} · 涨幅: ${dayChgHtml} · EMA(${s.ema_period||'-'}): <b>${ema}</b> · MA(${s.ma_period||'-'}): <b>${ma}</b></p>
-              <p>实时余额: ${balHtml} / 初始保证金: ${s.initial_balance} · 杠杆: ${s.leverage}x · 手续费率: ${(s.fee_rate*100).toFixed(3)}%</p>
-            `;
+            const balHtml = `<b>${bal ?? '-'}</b>`;
+            const unrealHtml = `<b class="${balCls}">${isFinite(balDiff)?balDiff.toFixed(2):'-'}</b>`;
+            const initBal = (s.initial_balance !== undefined && s.initial_balance !== null)
+              ? Number(s.initial_balance).toFixed(2)
+              : '-';
             const pos = s.position || {};
+            const posMargin = (pos.margin_usdt !== undefined && pos.margin_usdt !== null) ? Number(pos.margin_usdt).toFixed(2) : '-';
+            document.getElementById('status').innerHTML = `
+              <p>价格: ${priceHtml} · 涨幅: ${dayChgHtml} · EMA(${s.ema_period||'-'}): <b style="color:#106697">${ema}</b> · MA(${s.ma_period||'-'}): <b style="color:#f59e0b">${ma}</b></p>
+              <p>钱包余额: ${balHtml} · 保证金余额: <b>${initBal}</b> · 保证金: <b>${posMargin}</b> · 未实现盈亏: ${unrealHtml}</p>
+            `;
+            // 当前持仓及总盈亏卡片
             const side = pos.side || '-';
             const entry = pos.entry_price ? pos.entry_price.toFixed(1) : '-';
-            const qty = pos.qty ? pos.qty.toFixed(4) : '-';
+            const apiQtyUsdt = (pos.api_qty_usdt !== undefined && pos.api_qty_usdt !== null) ? Number(pos.api_qty_usdt).toFixed(2) : null;
+            const qty = (apiQtyUsdt !== null) ? (apiQtyUsdt + ' USDT') : (pos.qty ? pos.qty.toFixed(4) : '-');
             const val = pos.value ? pos.value.toFixed(2) : '-';
             const totals = s.totals || {};
             const tp = (totals.total_pnl !== undefined && totals.total_pnl !== null) ? Number(totals.total_pnl).toFixed(2) : '-';
@@ -906,7 +953,24 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
           (async () => { const r = await fetch('/status'); const s = await r.json(); render(s); renderChart(); })();
           // 订阅服务端事件，实现与 Binance WS 同步节奏的实时更新
           const es = new EventSource('/events/status');
-          es.onmessage = (e) => { try { const s = JSON.parse(e.data); render(s); } catch (_) {} };
+          es.onmessage = (e) => {
+            try {
+              const s = JSON.parse(e.data);
+              render(s);
+              // 根据最新未收盘K线的时间戳触发图表刷新，并保留当前视图范围
+              const k = s.latest_kline || {};
+              const ts = Number(k.close_time);
+              const nowMs = Date.now();
+              const shouldUpdate = (
+                isFinite(ts) && (LAST_K_TS === null || ts !== LAST_K_TS)
+              ) || (nowMs - LAST_CHART_UPDATE_MS > 1500); // 若时间未变也每 ~1.5s 刷一次以体现未收盘价格变化
+              if (!RELOADING && shouldUpdate) {
+                LAST_K_TS = ts;
+                LAST_CHART_UPDATE_MS = nowMs;
+                renderChart(K_LIMIT, LAST_RANGE);
+              }
+            } catch (_) {}
+          };
           </script>
         </body>
         </html>
@@ -1000,6 +1064,17 @@ def main():
     )
     if enable_poller:
         start_price_poller(engine, client, events_q=events_q)
+
+    # 实盘模式下，若存在密钥，启动账户轮询，刷新钱包余额与保证金余额
+    try:
+        if not bool(tcfg.get("test_mode", True)):
+            api_key = str(tcfg.get("api_key") or "")
+            secret_key = str(tcfg.get("secret_key") or "")
+            if api_key and secret_key:
+                auth_client = BinanceClient(base_url=tcfg.get("base_url", "https://fapi.binance.com"), api_key=api_key, secret_key=secret_key)
+                start_account_poller(engine, auth_client, events_q=events_q)
+    except Exception:
+        pass
 
     # 将完整配置附加到引擎供 /chart 使用（读取 data_period_days）
     try:
