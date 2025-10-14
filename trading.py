@@ -141,6 +141,28 @@ class TradingEngine:
         self._restore_balance_from_wallet()
         # 启动时恢复未平仓的持仓信息（保证重启后仍显示当前持仓）
         self._restore_open_position()
+        # 实盘模式：用交易所真实持仓覆盖本地持仓，避免重启后本地状态与实盘不一致
+        try:
+            if (not self.test_mode) and self._client_auth:
+                rp = self._client_auth.get_futures_position(self.symbol)
+                if isinstance(rp, dict) and rp.get("positionAmt") is not None:
+                    amt = float(rp.get("positionAmt"))
+                    if abs(amt) > 0:
+                        side = "LONG" if amt > 0 else "SHORT"
+                        entry = float(rp.get("entryPrice") or 0.0) or None
+                        qty = abs(amt)
+                        # 以 0 记录开仓手续费占位；真实手续费在后续 CLOSE 记录计算净盈亏时体现
+                        self.position = Position(side=side, entry_price=entry, qty=qty, open_fee=0.0)
+                        # 覆盖 position 表，保证后续重启也能恢复到与实盘一致的持仓
+                        self._clear_position()
+                        self._save_position()
+                        try:
+                            print(f"[SYNC-POS] from API: side={side} entry={entry} qty={qty}")
+                        except Exception:
+                            pass
+        except Exception:
+            # 若同步失败，保留本地推断的持仓；状态接口仍会显示实盘的真实持仓
+            pass
 
     # --------------------- DB ---------------------
     def _init_db(self):
