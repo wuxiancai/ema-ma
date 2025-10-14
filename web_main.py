@@ -828,12 +828,12 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               : NaN;
             const dayChgCls = isFinite(dayChg) ? (dayChg > 0 ? 'green' : (dayChg < 0 ? 'red' : '')) : '';
             const dayChgHtml = `<b class="${dayChgCls}">${isFinite(dayChg)?dayChg.toFixed(1)+'%':'-'}</b>`;
-            const balDiff = (s.balance !== undefined && s.initial_balance !== undefined)
-              ? (Number(s.initial_balance) - Number(s.balance))
-              : 0;
-            const balCls = balDiff > 0 ? 'green' : (balDiff < 0 ? 'red' : '');
+            // 未实现盈亏采用后端提供的净值（扣除预估平仓手续费），不再用余额差
             const balHtml = `<b>${bal ?? '-'}</b>`;
-            const unrealHtml = `<b class="${balCls}">${isFinite(balDiff)?balDiff.toFixed(2):'-'}</b>`;
+            const pos2 = s.position || {};
+            const unrealNum = (pos2.unrealized_pnl !== undefined && pos2.unrealized_pnl !== null) ? Number(pos2.unrealized_pnl) : NaN;
+            const unrealCls = isFinite(unrealNum) ? (unrealNum>0?'green':(unrealNum<0?'red':'')) : '';
+            const unrealHtml = `<b class="${unrealCls}">${isFinite(unrealNum)?unrealNum.toFixed(2):'-'}</b>`;
             const initBal = (s.initial_balance !== undefined && s.initial_balance !== null)
               ? Number(s.initial_balance).toFixed(2)
               : '-';
@@ -848,7 +848,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const entry = pos.entry_price ? pos.entry_price.toFixed(1) : '-';
             const apiQtyUsdt = (pos.api_qty_usdt !== undefined && pos.api_qty_usdt !== null) ? Number(pos.api_qty_usdt).toFixed(2) : null;
             const qty = (apiQtyUsdt !== null) ? (apiQtyUsdt + ' USDT') : (pos.qty ? pos.qty.toFixed(4) : '-');
-            const val = pos.value ? pos.value.toFixed(2) : '-';
+            // 实时价值 = 数量(USDT) + 未实现盈亏（后端已计算并提供在 pos.value）
+            const val = (pos.value !== undefined && pos.value !== null) ? Number(pos.value).toFixed(2) : '-';
             const totals = s.totals || {};
             const tp = (totals.total_pnl !== undefined && totals.total_pnl !== null) ? Number(totals.total_pnl).toFixed(2) : '-';
             const tf = (totals.total_fee !== undefined && totals.total_fee !== null) ? Number(totals.total_fee).toFixed(2) : '-';
@@ -911,7 +912,8 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             `;
             const tb = document.querySelector('#trades tbody');
             tb.innerHTML = '';
-            (s.recent_trades||[]).forEach(t => {
+            const tradesArr = (s.recent_trades||[]);
+            tradesArr.forEach((t, idx) => {
               // 仅显示时间（时:分:秒），不显示日期
               const d = new Date(t.time).toLocaleTimeString();
               const price = Number(t.price);
@@ -926,10 +928,22 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               const pnlCls = (isFinite(pnlNum) && pnlNum !== 0) ? (pnlNum>0?'green':'red') : '';
               const rateNum = (isFinite(pnlNum) && isFinite(notional) && notional > 0) ? (pnlNum / notional) : NaN;
               const rateCls = (isFinite(rateNum) && rateNum !== 0) ? (rateNum>0?'green':'red') : '';
-              const sideCls2 = (t.side === 'LONG' ? 'green' : (t.side === 'SHORT' ? 'red' : ''));
+              // 方向显示映射：LONG→开多，SHORT→开空，CLOSE→平多/平空（根据上一笔开仓）
+              let displaySide = '';
+              if (t.side === 'LONG') displaySide = '开多';
+              else if (t.side === 'SHORT') displaySide = '开空';
+              else if (t.side === 'CLOSE') {
+                const prevOpen = tradesArr[idx+1];
+                if (prevOpen && prevOpen.side === 'LONG') displaySide = '平多';
+                else if (prevOpen && prevOpen.side === 'SHORT') displaySide = '平空';
+                else displaySide = '平仓';
+              } else {
+                displaySide = String(t.side||'');
+              }
+              const sideCls2 = (t.side === 'LONG' ? 'green' : (t.side === 'SHORT' ? 'red' : pnlCls));
               tb.innerHTML += `<tr>
                 <td>${d}</td>
-                <td class="${sideCls2}">${t.side}</td>
+                <td class="${sideCls2}">${displaySide}</td>
                 <td>${isFinite(price) ? price.toFixed(1) : '-'}</td>
                 <td>${isFinite(qty) ? qty.toFixed(4) : '-'}</td>
                 <td>${isFinite(fee) ? fee.toFixed(2) : '-'}</td>

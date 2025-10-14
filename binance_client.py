@@ -193,6 +193,7 @@ class BinanceClient:
         - isolatedWallet: 逐仓保证金（仅逐仓）
         - initialMargin: 初始保证金（全仓/逐仓均可能提供）
         - positionSide: BOTH/LONG/SHORT
+        - unrealizedProfit: 未实现盈亏（来自 Binance 原始字段）
         - margin: 统一保证金数值（优先 initialMargin；否则使用 isolatedWallet）
         """
         if not (self.api_key and self.secret_key):
@@ -229,6 +230,7 @@ class BinanceClient:
                 "isolatedWallet": float(chosen.get("isolatedWallet")) if chosen.get("isolatedWallet") is not None else None,
                 "initialMargin": float(chosen.get("initialMargin")) if chosen.get("initialMargin") is not None else None,
                 "positionSide": chosen.get("positionSide"),
+                "unrealizedProfit": float(chosen.get("unrealizedProfit")) if chosen.get("unrealizedProfit") is not None else None,
             }
             # 统一保证金字段
             margin = out.get("initialMargin")

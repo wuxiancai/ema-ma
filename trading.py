@@ -687,6 +687,7 @@ class TradingEngine:
         entry_price = self.position.entry_price
         qty_coin = self.position.qty
         pos_margin = None
+        unrealized_net: float | None = None
         if isinstance(real_pos, dict) and real_pos.get("positionAmt") is not None:
             amt = float(real_pos.get("positionAmt"))
             qty_coin = abs(amt)
@@ -701,10 +702,35 @@ class TradingEngine:
             m = real_pos.get("margin")
             if isinstance(m, (int, float)):
                 pos_margin = float(m)
+            # 计算净未实现盈亏（原始未实现盈亏 - 预估平仓手续费）
+            try:
+                unp = real_pos.get("unrealizedProfit")
+                if (unp is not None) and self.current_price and qty_coin:
+                    unp_val = float(unp)
+                    notional = float(self.current_price) * float(qty_coin)
+                    close_fee_est = notional * float(self.fee_rate)
+                    unrealized_net = float(unp_val) - float(close_fee_est)
+            except Exception:
+                pass
+        else:
+            # 模拟或无 API 情况：用本地持仓与当前价格估算净未实现盈亏
+            try:
+                if side and entry_price and qty_coin and self.current_price:
+                    ep = float(entry_price)
+                    cp = float(self.current_price)
+                    q = float(qty_coin)
+                    open_pnl = (cp - ep) * q if side == "LONG" else (ep - cp) * q
+                    notional = cp * q
+                    close_fee_est = notional * float(self.fee_rate)
+                    unrealized_net = float(open_pnl) - float(close_fee_est)
+            except Exception:
+                pass
         # 当前持仓名义（用于“数量: USDT”显示）
-        pos_val = 0.0
+        # 名义价值（数量(币)×价格），以及“实时价值=名义价值+净未实现盈亏”
+        pos_val_nominal = 0.0
         if qty_coin and self.current_price:
-            pos_val = float(qty_coin) * float(self.current_price)
+            pos_val_nominal = float(qty_coin) * float(self.current_price)
+        pos_val_display = pos_val_nominal + (float(unrealized_net) if isinstance(unrealized_net, (int, float)) else 0.0)
 
         latest_kline = self.latest_kline
         out = {
@@ -725,10 +751,13 @@ class TradingEngine:
                 "side": side,
                 "entry_price": entry_price,
                 "qty": qty_coin,
-                "value": pos_val,
+                # 显示值：数量(USDT)+净未实现盈亏
+                "value": pos_val_display,
                 # 供前端显示 Binance UI 的“数量(USDT)”与“保证金(USDT)”
-                "api_qty_usdt": pos_val if (qty_coin and self.current_price) else None,
+                "api_qty_usdt": pos_val_nominal if (qty_coin and self.current_price) else None,
                 "margin_usdt": pos_margin,
+                # 供前端直接展示“未实现盈亏”
+                "unrealized_pnl": unrealized_net,
             },
             "latest_kline": latest_kline,
         }
