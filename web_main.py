@@ -769,7 +769,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               ? `<code class="red" style="font-weight:700">${memLeft}</code>`
               : `<code>${memLeft}</code>`;
             document.getElementById('kmeta').innerHTML = `
-              <div class="left">⏰ 服务器时间: <code>${new Date(s.server_time).toLocaleString()}</code></div>
+              <div class="left">⏰ <code>${new Date(s.server_time).toLocaleString()}</code></div>
               <div class="right">⚙️ CPU <code>${fmtPct(sys.cpu_percent)}</code> · 内存余:${memLeftHtml} · 磁盘余:<code>${diskLeft}</code></div>
             `;
             // 配置汇总（不展示 API 密钥），以单行在“系统参数配置”卡片中显示。
