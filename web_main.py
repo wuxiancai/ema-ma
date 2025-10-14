@@ -583,7 +583,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             </div>
             <div class="card">
               <h2>最近交易</h2>
-              <table id="trades"><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th><th>盈亏</th><th>利润率</th></tr></thead><tbody></tbody></table>
+              <table id="trades"><thead><tr><th>时间</th><th>方向</th><th>成交价格</th><th>数量(币)</th><th>手续费</th><th>已实现盈亏</th><th>利润率</th></tr></thead><tbody></tbody></table>
             </div>
             <div class="card">
               <h2>实时 K 线</h2>
@@ -907,7 +907,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             }
             document.getElementById('position').innerHTML = `
               <p>总盈亏: <b class="${tpCls}">${tp}</b> · 总利润率: <b class="${roiCls}">${roiPct}</b> · 总手续费: <b>${tf}</b> · 交易次数: <b>${tc}</b></p>
-              <p>方向: <b class="${sideCls}">${side}</b> · 开仓价: ${entry} · 数量: ${qty} · 当前价值: <span class="${valCls}">${val}</span></p>
+              <p>方向: <b class="${sideCls}">${side}</b> · 开仓价格: ${entry} · 数量(USDT): ${qty} · 实时价值: <span class="${valCls}">${val}</span></p>
             `;
             const tb = document.querySelector('#trades tbody');
             tb.innerHTML = '';
