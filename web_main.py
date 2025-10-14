@@ -908,7 +908,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             }
             document.getElementById('position').innerHTML = `
               <p>总盈亏: <b class="${tpCls}">${tp}</b> · 总利润率: <b class="${roiCls}">${roiPct}</b> · 总手续费: <b>${tf}</b> · 交易次数: <b>${tc}</b></p>
-              <p>方向: <b class="${sideCls}">${side}</b> · 开仓价格: ${entry} · 数量(USDT): ${qty} · 实时价值: <span class="${valCls}">${val}</span></p>
+              <p>方向: <b class="${sideCls}">${side}</b> · 开仓价: ${entry} · 开仓金额: ${qty} · 实时价值: <span class="${valCls}">${val}</span></p>
             `;
             const tb = document.querySelector('#trades tbody');
             tb.innerHTML = '';
