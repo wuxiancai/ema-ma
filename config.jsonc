@@ -5,7 +5,7 @@
     "secret_key": "gwbbkf4uCPTJbMH6M3QZFJ4qtkqqzasg28vVZb20nkWwe7kDCZsSRSMjidHCb3Th",          // 币安 Secret Key（与 api_key 配对）
     "test_mode": false,          // 模拟交易开关：true=仅本地计算盈亏，不下真实单
     "initial_balance": 1000.0,  // 初始资金（USDT，仅模拟模式）
-    "percent": 0.5,             // 每次开仓使用当前余额比例（0~1），如 0.5=50%
+    "percent": 0.8,             // 每次开仓使用当前余额比例（0~1），如 0.5=50%
     "leverage": 20,             // 杠杆倍数，例如 10 表示 10x
     "fee_rate": 0.0005,         // 手续费率（开/平仓均按名义金额×该费率）
     "symbol": "BTCUSDT",       // 交易对（如 BTCUSDT / ETHUSDT）
