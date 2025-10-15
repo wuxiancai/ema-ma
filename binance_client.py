@@ -383,6 +383,29 @@ class BinanceClient:
         except Exception:
             return None
 
+    def set_position_side_dual(self, enable: bool, recv_window_ms: int = 5000) -> bool:
+        """设置双向持仓（hedge mode）。POST /fapi/v1/positionSide/dual（签名）
+
+        - enable=True 开启双向持仓；False 关闭。
+        - 返回 True 表示成功；否则 False。
+        说明：Binance 要求使用表单参数提交。
+        """
+        if not (self.api_key and self.secret_key):
+            return False
+        try:
+            url = f"{self.base_url}/fapi/v1/positionSide/dual"
+            params = {
+                "dualSidePosition": "true" if enable else "false",
+                "timestamp": int(time.time() * 1000),
+                "recvWindow": recv_window_ms,
+            }
+            params = self._sign_params(params)
+            resp = requests.post(url, data=params, headers=self._signed_headers(), timeout=8)
+            resp.raise_for_status()
+            return True
+        except Exception:
+            return False
+
 
 if __name__ == "__main__":
     # 简单自测

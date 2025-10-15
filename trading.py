@@ -104,6 +104,8 @@ class TradingEngine:
         self._dual_side: bool = False   # 是否开启双向持仓（Hedge Mode）
         self._min_qty: float | None = None  # 交易对最小数量（LOT_SIZE.minQty 或 MARKET_LOT_SIZE.minQty）
         self._min_notional: float | None = None  # 交易对最小名义金额（MIN_NOTIONAL.minNotional）
+        # 是否在启动时自动设置双向持仓（默认开启）
+        self.auto_set_dual_side: bool = bool(tcfg.get("auto_set_dual_side", True))
         try:
             if not self.test_mode:
                 api_key = str(tcfg.get("api_key") or "")
@@ -111,6 +113,25 @@ class TradingEngine:
                 base_url = str(tcfg.get("base_url") or "https://fapi.binance.com")
                 if api_key and secret_key:
                     self._client_auth = BinanceClient(base_url=base_url, api_key=api_key, secret_key=secret_key)
+                    # 启动时同步本地持仓（若存在真实持仓），避免与实盘状态不一致
+                    try:
+                        rp_any = self._client_auth.get_futures_position(self.symbol)
+                        if rp_any and rp_any.get("positionAmt") is not None and abs(float(rp_any.get("positionAmt"))) > 0:
+                            amt = float(rp_any.get("positionAmt"))
+                            side_sync = ("LONG" if amt > 0 else ("SHORT" if amt < 0 else None))
+                            if side_sync:
+                                ep = rp_any.get("entryPrice")
+                                entry_sync = (float(ep) if ep is not None else None)
+                                qty_sync = abs(amt)
+                                self.position = Position(side=side_sync, entry_price=entry_sync, qty=qty_sync, open_fee=0.0)
+                                try:
+                                    msg = f"[ACCOUNT] 启动同步持仓: side={side_sync} entry={entry_sync} qty={qty_sync}"
+                                    print(msg)
+                                    self._log(msg)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
                     totals = self._client_auth.get_futures_account_totals()
                     if totals:
                         twb = totals.get("totalWalletBalance")
@@ -153,6 +174,28 @@ class TradingEngine:
                         ds = self._client_auth.get_position_side_dual()
                         if isinstance(ds, bool):
                             self._dual_side = ds
+                            # 按需自动设置为双向持仓
+                            if self.auto_set_dual_side and (not ds):
+                                ok = False
+                                try:
+                                    ok = self._client_auth.set_position_side_dual(True)
+                                except Exception:
+                                    ok = False
+                                if ok:
+                                    self._dual_side = True
+                                    try:
+                                        msg = "[ACCOUNT] 已自动开启双向持仓 (hedge mode)"
+                                        print(msg)
+                                        self._log(msg)
+                                    except Exception:
+                                        pass
+                                else:
+                                    try:
+                                        msg = "[ACCOUNT] 自动开启双向持仓失败，请检查 API 权限或合约账户状态"
+                                        print(msg)
+                                        self._log(msg)
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
         except Exception:
@@ -512,6 +555,10 @@ class TradingEngine:
             except Exception:
                 pass
 
+        # 若配置为仅收盘交易，则在未收盘事件直接退出（但仍记录交叉日志）
+        if self.use_closed_only and (not bool(k.get("is_final", False))):
+            return
+
         if self.position.side is None:
             # 开仓逻辑（记录每个条件，便于对比 Binance 图表）
             slope_ok_long = (ema_rising if self.use_slope else True)
@@ -696,7 +743,12 @@ class TradingEngine:
                 order_side = "BUY" if side == "LONG" else "SELL"
                 # 双向持仓传 LONG/SHORT；单向持仓不传 positionSide
                 pos_side = ("LONG" if (self._dual_side and side == "LONG") else ("SHORT" if (self._dual_side and side == "SHORT") else None))
-                print(f"[ORDER-OPEN] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side}")
+                msg_try = f"[ORDER-OPEN] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side}"
+                print(msg_try)
+                try:
+                    self._log(msg_try)
+                except Exception:
+                    pass
                 res = self._client_auth.create_futures_market_order(
                     self.symbol,
                     order_side,
@@ -708,7 +760,12 @@ class TradingEngine:
                 order_success = False
                 if isinstance(res, dict):
                     if res.get("error"):
-                        print(f"[ORDER-OPEN] error: {res}")
+                        msg_err = f"[ORDER-OPEN] error: {res}"
+                        print(msg_err)
+                        try:
+                            self._log(msg_err)
+                        except Exception:
+                            pass
                     else:
                         avg_price = res.get("avgPrice")
                         cum_qty = res.get("cumQty") or res.get("executedQty")
@@ -720,18 +777,43 @@ class TradingEngine:
                         # 成功条件：有成交数量或状态为 FILLED
                         if (cum_qty is not None and float(cum_qty) > 0) or str(status).upper() == "FILLED":
                             order_success = True
-                        print(f"[ORDER-OPEN] resp status={status} avgPrice={avg_price} executedQty={cum_qty}")
+                        msg_resp = f"[ORDER-OPEN] resp status={status} avgPrice={avg_price} executedQty={cum_qty}"
+                        print(msg_resp)
+                        try:
+                            self._log(msg_resp)
+                        except Exception:
+                            pass
                 else:
-                    print("[ORDER-OPEN] failed: no response")
+                    msg_no = "[ORDER-OPEN] failed: no response"
+                    print(msg_no)
+                    try:
+                        self._log(msg_no)
+                    except Exception:
+                        pass
                 # 若实盘下单失败，则不更新本地持仓与余额
                 if not order_success:
-                    print("[OPEN] skipped local position update due to order failure")
+                    msg_skip = "[OPEN] skipped local position update due to order failure"
+                    print(msg_skip)
+                    try:
+                        self._log(msg_skip)
+                    except Exception:
+                        pass
                     return
             except Exception as e:
                 try:
-                    print(f"[ORDER-OPEN] exception during placing order: {e}")
+                    msg_exc = f"[ORDER-OPEN] exception during placing order: {e}"
+                    print(msg_exc)
+                    try:
+                        self._log(msg_exc)
+                    except Exception:
+                        pass
                 except Exception:
-                    print("[ORDER-OPEN] exception during placing order")
+                    msg_exc2 = "[ORDER-OPEN] exception during placing order"
+                    print(msg_exc2)
+                    try:
+                        self._log(msg_exc2)
+                    except Exception:
+                        pass
                 # 异常同样跳过本地更新
                 return
         fee = (exec_price * exec_qty * self.leverage) * self.fee_rate / self.leverage  # 近似开仓手续费
@@ -763,7 +845,12 @@ class TradingEngine:
             try:
                 order_side = "SELL" if side == "LONG" else "BUY"
                 pos_side = ("LONG" if (self._dual_side and side == "LONG") else ("SHORT" if (self._dual_side and side == "SHORT") else None))
-                print(f"[ORDER-CLOSE] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side}")
+                msg_try = f"[ORDER-CLOSE] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side}"
+                print(msg_try)
+                try:
+                    self._log(msg_try)
+                except Exception:
+                    pass
                 res = self._client_auth.create_futures_market_order(
                     self.symbol,
                     order_side,
@@ -775,7 +862,12 @@ class TradingEngine:
                 order_success = False
                 if isinstance(res, dict):
                     if res.get("error"):
-                        print(f"[ORDER-CLOSE] error: {res}")
+                        msg_err = f"[ORDER-CLOSE] error: {res}"
+                        print(msg_err)
+                        try:
+                            self._log(msg_err)
+                        except Exception:
+                            pass
                     else:
                         avg_price = res.get("avgPrice")
                         cum_qty = res.get("cumQty") or res.get("executedQty")
@@ -786,17 +878,42 @@ class TradingEngine:
                             exec_qty = float(cum_qty)
                         if (cum_qty is not None and float(cum_qty) > 0) or str(status).upper() == "FILLED":
                             order_success = True
-                        print(f"[ORDER-CLOSE] resp status={status} avgPrice={avg_price} executedQty={cum_qty}")
+                        msg_resp = f"[ORDER-CLOSE] resp status={status} avgPrice={avg_price} executedQty={cum_qty}"
+                        print(msg_resp)
+                        try:
+                            self._log(msg_resp)
+                        except Exception:
+                            pass
                 else:
-                    print("[ORDER-CLOSE] failed: no response")
+                    msg_no = "[ORDER-CLOSE] failed: no response"
+                    print(msg_no)
+                    try:
+                        self._log(msg_no)
+                    except Exception:
+                        pass
                 if not order_success:
-                    print("[CLOSE] skipped local position update due to order failure")
+                    msg_skip = "[CLOSE] skipped local position update due to order failure"
+                    print(msg_skip)
+                    try:
+                        self._log(msg_skip)
+                    except Exception:
+                        pass
                     return False
             except Exception as e:
                 try:
-                    print(f"[ORDER-CLOSE] exception during placing order: {e}")
+                    msg_exc = f"[ORDER-CLOSE] exception during placing order: {e}"
+                    print(msg_exc)
+                    try:
+                        self._log(msg_exc)
+                    except Exception:
+                        pass
                 except Exception:
-                    print("[ORDER-CLOSE] exception during placing order")
+                    msg_exc2 = "[ORDER-CLOSE] exception during placing order"
+                    print(msg_exc2)
+                    try:
+                        self._log(msg_exc2)
+                    except Exception:
+                        pass
                 return False
 
         pnl = 0.0
