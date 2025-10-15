@@ -516,7 +516,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               gap: 8px;
             }
             .kmeta .left { margin-left: 12px; }
-            .kmeta .right { margin-left: auto; text-align: right; margin-right: 12px; }
+            .kmeta .right { margin-left: auto; text-align: right; margin-right: 32px; }
 
             /* 表格：极细边与行悬停微亮 */
             table { width: 100%; border-collapse: collapse; border: 0; }
