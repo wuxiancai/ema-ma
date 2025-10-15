@@ -578,11 +578,11 @@ class TradingEngine:
                             print(msg)
                             self._log(msg)
                         else:
-                            self._open_position("LONG", price)
+                            self._open_with_confirm("LONG", price)
                     except Exception:
-                        self._open_position("LONG", price)
+                        self._open_with_confirm("LONG", price)
                 else:
-                    self._open_position("LONG", price)
+                    self._open_with_confirm("LONG", price)
             elif cross.golden_cross and self.enable_signal_debug_log:
                 print(f"[OPEN-CHECK] LONG miss: price>{ema_curr:.2f}={price>ema_curr} ema>{ma_curr:.2f}={ema_curr>ma_curr} rising={ema_rising} slope_on={self.use_slope}")
             if cond_short:
@@ -598,11 +598,11 @@ class TradingEngine:
                             print(msg)
                             self._log(msg)
                         else:
-                            self._open_position("SHORT", price)
+                            self._open_with_confirm("SHORT", price)
                     except Exception:
-                        self._open_position("SHORT", price)
+                        self._open_with_confirm("SHORT", price)
                 else:
-                    self._open_position("SHORT", price)
+                    self._open_with_confirm("SHORT", price)
             elif cross.death_cross and self.enable_signal_debug_log:
                 print(f"[OPEN-CHECK] SHORT miss: price<{ema_curr:.2f}={price<ema_curr} ema<{ma_curr:.2f}={ema_curr<ma_curr} rising={ema_rising} slope_on={self.use_slope}")
         else:
@@ -633,7 +633,7 @@ class TradingEngine:
                                     self.position = Position(side="LONG", entry_price=(float(rp_long.get("entryPrice")) if rp_long.get("entryPrice") is not None else self.position.entry_price), qty=abs(float(rp_long.get("positionAmt"))), open_fee=float(self.position.open_fee or 0.0))
                                 except Exception:
                                     pass
-                                closed = self._close_position(price)
+                                closed = self._close_with_confirm(prev_side="LONG", price=price)
                                 if closed:
                                     # 平多后，若已存在空仓则跳过开空
                                     rp_short2 = self._client_auth.get_futures_position(self.symbol, prefer_side="SHORT")
@@ -643,16 +643,16 @@ class TradingEngine:
                                         print(msg2)
                                         self._log(msg2)
                                     else:
-                                        self._open_position("SHORT", price)
+                                        self._open_with_confirm("SHORT", price)
                         except Exception:
                             # 出现异常则按本地逻辑执行
-                            closed = self._close_position(price)
+                            closed = self._close_with_confirm(prev_side="LONG", price=price)
                             if closed:
-                                self._open_position("SHORT", price)
+                                self._open_with_confirm("SHORT", price)
                     else:
-                        closed = self._close_position(price)
+                        closed = self._close_with_confirm(prev_side="LONG", price=price)
                         if closed:
-                            self._open_position("SHORT", price)
+                            self._open_with_confirm("SHORT", price)
             elif self.position.side == "SHORT":
                 if cross.golden_cross:
                     # 金叉：收盘时严格检查实盘是否持有空仓
@@ -670,7 +670,7 @@ class TradingEngine:
                                     self.position = Position(side="SHORT", entry_price=(float(rp_short.get("entryPrice")) if rp_short.get("entryPrice") is not None else self.position.entry_price), qty=abs(float(rp_short.get("positionAmt"))), open_fee=float(self.position.open_fee or 0.0))
                                 except Exception:
                                     pass
-                                closed = self._close_position(price)
+                                closed = self._close_with_confirm(prev_side="SHORT", price=price)
                                 if closed:
                                     # 平空后，若已存在多仓则跳过开多
                                     rp_long2 = self._client_auth.get_futures_position(self.symbol, prefer_side="LONG")
@@ -680,16 +680,16 @@ class TradingEngine:
                                         print(msg2)
                                         self._log(msg2)
                                     else:
-                                        self._open_position("LONG", price)
+                                        self._open_with_confirm("LONG", price)
                         except Exception:
                             # 出现异常则按本地逻辑执行
-                            closed = self._close_position(price)
+                            closed = self._close_with_confirm(prev_side="SHORT", price=price)
                             if closed:
-                                self._open_position("LONG", price)
+                                self._open_with_confirm("LONG", price)
                     else:
-                        closed = self._close_position(price)
+                        closed = self._close_with_confirm(prev_side="SHORT", price=price)
                         if closed:
-                            self._open_position("LONG", price)
+                            self._open_with_confirm("LONG", price)
 
         # 收盘时落库
         if bool(k.get("is_final", False)):
@@ -733,7 +733,7 @@ class TradingEngine:
             pass
         return notional, qty
 
-    def _open_position(self, side: str, price: float):
+    def _open_position(self, side: str, price: float) -> bool:
         notional, qty = self._notional_and_qty(price)
         exec_price = price
         exec_qty = qty
@@ -798,7 +798,7 @@ class TradingEngine:
                         self._log(msg_skip)
                     except Exception:
                         pass
-                    return
+                    return False
             except Exception as e:
                 try:
                     msg_exc = f"[ORDER-OPEN] exception during placing order: {e}"
@@ -815,7 +815,7 @@ class TradingEngine:
                     except Exception:
                         pass
                 # 异常同样跳过本地更新
-                return
+                return False
         fee = (exec_price * exec_qty * self.leverage) * self.fee_rate / self.leverage  # 近似开仓手续费
         self.balance -= fee
         self._insert_trade(side, exec_price, exec_qty, fee, pnl=-fee)
@@ -829,6 +829,7 @@ class TradingEngine:
             self._log(f"[OPEN] {side} price={exec_price:.2f} qty={exec_qty:.6f} fee={fee:.4f} bal={self.balance:.2f}")
         except Exception:
             pass
+        return True
 
     def _close_position(self, price: float) -> bool:
         if self.position.side is None or self.position.entry_price is None or self.position.qty is None:
@@ -845,7 +846,8 @@ class TradingEngine:
             try:
                 order_side = "SELL" if side == "LONG" else "BUY"
                 pos_side = ("LONG" if (self._dual_side and side == "LONG") else ("SHORT" if (self._dual_side and side == "SHORT") else None))
-                msg_try = f"[ORDER-CLOSE] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side}"
+                ro_flag = (False if self._dual_side else True)
+                msg_try = f"[ORDER-CLOSE] try {order_side} {self.symbol} qty={qty:.6f} pos_side={pos_side or '-'} dual={self._dual_side} reduceOnly={ro_flag}"
                 print(msg_try)
                 try:
                     self._log(msg_try)
@@ -855,7 +857,7 @@ class TradingEngine:
                     self.symbol,
                     order_side,
                     quantity=round(qty, 6),
-                    reduce_only=True,
+                    reduce_only=ro_flag,
                     position_side=pos_side,
                     new_order_resp_type="RESULT",
                 )
@@ -940,6 +942,72 @@ class TradingEngine:
         # 清除未平仓持仓记录
         self._clear_position()
         return True
+
+    def _open_with_confirm(self, side: str, price: float, *, max_retries: int = 3, delay_sec: float = 0.8) -> bool:
+        """开仓并确认成功；若失败或未持仓则重试。仅在实盘开启 API 时执行确认。"""
+        for attempt in range(1, int(max_retries) + 1):
+            ok = self._open_position(side, price)
+            if not ok:
+                try:
+                    self._log(f"[OPEN-CHECK] attempt {attempt} failed, retrying...")
+                except Exception:
+                    pass
+                time.sleep(delay_sec)
+                continue
+            # 验证持仓（仅实盘）
+            if (not self.test_mode) and self._client_auth:
+                try:
+                    prefer = (side if self._dual_side else None)
+                    rp = self._client_auth.get_futures_position(self.symbol, prefer_side=prefer)
+                    has_pos = bool(rp and rp.get("positionAmt") is not None and abs(float(rp.get("positionAmt"))) > 0)
+                    if has_pos:
+                        return True
+                    else:
+                        msg = f"[OPEN-CHECK] no position detected after open, attempt {attempt}"
+                        print(msg)
+                        try:
+                            self._log(msg)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            else:
+                return True
+            time.sleep(delay_sec)
+        return False
+
+    def _close_with_confirm(self, prev_side: str, price: float, *, max_retries: int = 3, delay_sec: float = 0.8) -> bool:
+        """平仓并确认已清仓；若失败或仍有仓位则重试。"""
+        for attempt in range(1, int(max_retries) + 1):
+            ok = self._close_position(price)
+            if not ok:
+                try:
+                    self._log(f"[CLOSE-CHECK] attempt {attempt} failed, retrying...")
+                except Exception:
+                    pass
+                time.sleep(delay_sec)
+                continue
+            # 验证清仓（仅实盘）
+            if (not self.test_mode) and self._client_auth:
+                try:
+                    prefer = (prev_side if self._dual_side else None)
+                    rp = self._client_auth.get_futures_position(self.symbol, prefer_side=prefer)
+                    has_pos = bool(rp and rp.get("positionAmt") is not None and abs(float(rp.get("positionAmt"))) > 0)
+                    if not has_pos:
+                        return True
+                    else:
+                        msg = f"[CLOSE-CHECK] position remains after close, attempt {attempt}"
+                        print(msg)
+                        try:
+                            self._log(msg)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            else:
+                return True
+            time.sleep(delay_sec)
+        return False
 
     def _log(self, msg: str):
         try:
