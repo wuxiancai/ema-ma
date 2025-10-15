@@ -91,12 +91,22 @@ def get_sysinfo() -> dict:
         return {}
 
 def get_config_summary(engine: TradingEngine, tz_offset_hours: int, enable_poller: bool) -> dict:
-    """汇总需要在页面展示的配置参数（不含 API 密钥）。"""
+    """汇总在页面展示的配置参数与运行信息（不含 API 密钥）。"""
     try:
         # 从完整配置中提取前端展示相关项（如图表高度），若不存在则提供默认值
         full_cfg = getattr(engine, "_config", {}) or {}
         wcfg = (full_cfg.get("web") if isinstance(full_cfg, dict) else {}) or {}
         chart_h = int(wcfg.get("chart_height_px", 420))
+        # 交易时长：从数据库初始化时间开始累计（跨重启不清零）
+        start_ms = getattr(engine, "db_start_ms", None)
+        now_ms = int(time.time() * 1000)
+        days = 0
+        hours = 0
+        if isinstance(start_ms, (int, float)) and start_ms > 0:
+            dms = max(0, now_ms - int(start_ms))
+            days = dms // (24 * 3600 * 1000)
+            hours = (dms % (24 * 3600 * 1000)) // (3600 * 1000)
+        duration_txt = f"{int(days)}天 {int(hours)}小时"
         return {
             "trading": {
                 "test_mode": engine.test_mode,
@@ -117,6 +127,8 @@ def get_config_summary(engine: TradingEngine, tz_offset_hours: int, enable_polle
                 "timezone_offset_hours": tz_offset_hours,
                 "enable_price_poller": enable_poller,
                 "chart_height_px": chart_h,
+                "trading_start_time_ms": int(start_ms) if isinstance(start_ms, (int, float)) else None,
+                "trading_duration_text": duration_txt,
             },
         }
     except Exception:
@@ -129,27 +141,11 @@ def start_ws(
     events_q: queue.Queue | None = None,
     *,
     client: BinanceClient,
+    tz_offset_hours: int,
+    enable_poller: bool,
     enable_fallback_poller: bool = True,
 ):
-    """启动 Binance WS，并在 WS 异常/关闭时自动启用价格轮询作为回退。
-
-    - enable_fallback_poller: True 时，WS 不稳定会自动启用轮询；WS 恢复后关闭轮询
-    """
-
-    poller_stop = {"fn": None}
-
-    def start_poller_once():
-        if poller_stop["fn"] is None and enable_fallback_poller:
-            print("[Fallback] start price poller due to WS issue")
-            poller_stop["fn"] = start_price_poller(engine=engine, client=client, events_q=events_q)
-
-    def stop_poller_if_running():
-        if poller_stop["fn"] is not None:
-            try:
-                poller_stop["fn"]()
-            except Exception:
-                pass
-            poller_stop["fn"] = None
+    """启动 Binance WS（仅使用 WS，不再启用价格轮询回退）。"""
 
     def on_kline(k: dict):
         engine.on_realtime_kline(k)
@@ -162,23 +158,25 @@ def start_ws(
                 s["server_time"] = int(time.time() * 1000)
                 # 附带系统信息（CPU/MEM/DISK）
                 s["sysinfo"] = get_sysinfo()
-                # 汇总总盈亏/总手续费/总利润率
+                # 汇总总盈亏/总手续费/总收益率
                 s["totals"] = engine.totals()
+                # 附带配置汇总（含交易时长），保证卡片随事件更新
+                s["config"] = get_config_summary(engine, tz_offset_hours, enable_poller)
                 events_q.put_nowait(s)
             except Exception:
                 pass
 
     def on_open():
-        # WS 恢复，关闭回退轮询
-        stop_poller_if_running()
+        # WS 连接成功（不再使用价格轮询回退）
+        pass
 
     def on_error(_err):
-        # WS 异常，启动回退轮询
-        start_poller_once()
+        # WS 异常（保持仅 WS 策略，不启用轮询）
+        pass
 
     def on_close():
-        # WS 关闭，启动回退轮询
-        start_poller_once()
+        # WS 关闭（保持仅 WS 策略，不启用轮询）
+        pass
 
     ws = BinanceWebSocket(
         symbol,
@@ -192,11 +190,11 @@ def start_ws(
     return ws
 
 
-    def start_price_poller(engine: TradingEngine, client: BinanceClient, events_q: queue.Queue | None = None):
-      """轮询最新价格作为 WebSocket 的回退方案，保证页面与策略实时性。
+def start_price_poller(engine: TradingEngine, client: BinanceClient, events_q: queue.Queue | None = None, *, tz_offset_hours: int = 0, enable_poller: bool = True):
+    """轮询最新价格作为 WebSocket 的回退方案，保证页面与策略实时性。
 
-      每 2 秒获取一次价格，并更新引擎的当前价与未收盘K线价格。
-      """
+    每 2 秒获取一次价格，并更新引擎的当前价与未收盘K线价格。
+    """
     stop_flag = threading.Event()
 
     def run():
@@ -228,6 +226,8 @@ def start_ws(
                         s["sysinfo"] = get_sysinfo()
                         # 修复：轮询事件也附带 totals，避免页面在“-”与数值之间来回切换
                         s["totals"] = engine.totals()
+                        # 附带配置汇总（含交易时长）
+                        s["config"] = get_config_summary(engine, tz_offset_hours, enable_poller)
                         events_q.put_nowait(s)
                     except Exception:
                         pass
@@ -789,12 +789,12 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                 <p>
                   交易类型: <code>${t.test_mode?'模拟':'实盘'}</code> · 开仓比例:<code>${(Number(t.percent)*100).toFixed(0)}%</code> · 杠杆:<code>${t.leverage}x</code> · 手续费率:<code>${(Number(t.fee_rate)*100).toFixed(3)}%</code> · K线周期:<code>${t.interval}</code>
                   指标: EMA<code>${i.ema_period}</code> · MA<code>${i.ma_period}</code> · K线收盘后交易:<code>${fmtBool(i.use_closed_only)}</code>
-                  当前显示时区:<code>UTC+${w.timezone_offset_hours||0}</code>
+                  当前显示时区:<code>UTC+${w.timezone_offset_hours||0}</code> · 交易时长:<code>${w.trading_duration_text||'-'}</code>
                 </p>
               `;
             }
             const priceHtml = `<b class="green">${price}</b>`;
-            // 计算当日（UTC+0）00:00 基准价，并基于当前实时价格计算涨幅
+            // 计算当日（UTC+0）00:00 基准价，并基于当前实时价格计算涨跌幅
             const nowUtc = new Date(s.server_time || Date.now());
             const dayStartMs = Date.UTC(
               nowUtc.getUTCFullYear(),
@@ -840,7 +840,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             const pos = s.position || {};
             const posMargin = (pos.margin_usdt !== undefined && pos.margin_usdt !== null) ? Number(pos.margin_usdt).toFixed(2) : '-';
             document.getElementById('status').innerHTML = `
-              <p>价格: ${priceHtml} · 涨幅: ${dayChgHtml} · EMA(${s.ema_period||'-'}): <b style="color:#106697">${ema}</b> · MA(${s.ma_period||'-'}): <b style="color:#f59e0b">${ma}</b></p>
+              <p>价格: ${priceHtml} · 涨跌: ${dayChgHtml} · EMA(${s.ema_period||'-'}): <b style="color:#106697">${ema}</b> · MA(${s.ma_period||'-'}): <b style="color:#f59e0b">${ma}</b></p>
               <p>钱包余额: ${balHtml} · 保证金余额: <b>${initBal}</b> · 保证金: <b>${posMargin}</b> · 未实现盈亏: ${unrealHtml}</p>
             `;
             // 当前持仓及总盈亏卡片
@@ -907,7 +907,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               valCls = openPnl>0 ? 'green' : (openPnl<0 ? 'red' : '');
             }
             document.getElementById('position').innerHTML = `
-              <p>总盈亏: <b class="${tpCls}">${tp}</b> · 总利润率: <b class="${roiCls}">${roiPct}</b> · 总手续费: <b>${tf}</b> · 交易次数: <b>${tc}</b></p>
+              <p>总盈亏: <b class="${tpCls}">${tp}</b> · 总收益率: <b class="${roiCls}">${roiPct}</b> · 总手续费: <b>${tf}</b> · 交易次数: <b>${tc}</b></p>
               <p>方向: <b class="${sideCls}">${side}</b> · 开仓价: ${entry} · 开仓金额: ${qty} · 实时价值: <span class="${valCls}">${val}</span></p>
             `;
             const tb = document.querySelector('#trades tbody');
@@ -1066,18 +1066,20 @@ def main():
 
     # 事件队列供前端 SSE 使用
     events_q: queue.Queue = queue.Queue(maxsize=1000)
-    enable_poller = bool(wcfg.get("enable_price_poller", False))
-    # 启动 WS；当未开启价格轮询时，WS 出问题会自动启用轮询作回退
+    # 强制仅使用 WS，不启用价格轮询回退（忽略配置项）
+    enable_poller = False
+    # 启动 WS（仅 WS 模式）
     ws = start_ws(
         engine,
         engine.symbol,
         engine.interval,
         events_q=events_q,
         client=client,
-        enable_fallback_poller=not enable_poller,
+        tz_offset_hours=int(wcfg.get("timezone_offset_hours", 8)),
+        enable_poller=enable_poller,
+        enable_fallback_poller=False,
     )
-    if enable_poller:
-        start_price_poller(engine, client, events_q=events_q)
+    # 仅 WS 模式：不再启动价格轮询
 
     # 实盘模式下，若存在密钥，启动账户轮询，刷新钱包余额与保证金余额
     try:

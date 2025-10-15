@@ -59,11 +59,15 @@ class CrossSignal:
     death_cross: bool
 
 
-def crossover(ema_list: list[float], ma_list: list[float]) -> CrossSignal:
+def crossover(ema_list: list[float], ma_list: list[float], eps: float = 1e-8) -> CrossSignal:
     """判断金叉/死叉。仅在最近两个点均有效时判断。
 
-    - 金叉：前一根 EMA <= MA 且当前 EMA > MA
-    - 死叉：前一根 EMA >= MA 且当前 EMA < MA
+    说明：
+    - 引入 `eps` 浮点容差，避免由于浮点舍入导致的“刚好相等不触发”的情况；
+    - 将当前根的严格不等改为“包含等于”（>=/<=），以支持边界处的交叉识别。
+
+    - 金叉：前一根 EMA <= MA（含容差）且当前 EMA >= MA（含容差）
+    - 死叉：前一根 EMA >= MA（含容差）且当前 EMA <= MA（含容差）
     """
     if not ema_list or not ma_list:
         return CrossSignal(False, False)
@@ -75,8 +79,8 @@ def crossover(ema_list: list[float], ma_list: list[float]) -> CrossSignal:
     if prev_ema is None or curr_ema is None or prev_ma is None or curr_ma is None:
         return CrossSignal(False, False)
 
-    golden = prev_ema <= prev_ma and curr_ema > curr_ma
-    death = prev_ema >= prev_ma and curr_ema < curr_ma
+    golden = (prev_ema <= (prev_ma + eps)) and (curr_ema >= (curr_ma - eps))
+    death = (prev_ema >= (prev_ma - eps)) and (curr_ema <= (curr_ma + eps))
     return CrossSignal(golden_cross=golden, death_cross=death)
 
 

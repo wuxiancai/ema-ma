@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 import math
+import logging
+from logging.handlers import RotatingFileHandler
 
 from indicators import ema, sma, crossover, is_rising
 from binance_client import BinanceClient
@@ -64,6 +66,34 @@ class TradingEngine:
         self.use_closed_only: bool = bool(icfg.get("use_closed_only", True))
         # 是否将 EMA/MA 斜率（趋势）纳入开仓条件
         self.use_slope: bool = bool(icfg.get("use_slope", True))
+
+        # 日志文件（项目目录下 trading.log）
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            log_path = os.path.join(base_dir, "trading.log")
+            self._logger = logging.getLogger("trading_file_logger")
+            self._logger.setLevel(logging.INFO)
+            need_handler = True
+            for h in list(self._logger.handlers):
+                try:
+                    if hasattr(h, "baseFilename") and getattr(h, "baseFilename", "") == log_path:
+                        need_handler = False
+                        break
+                except Exception:
+                    pass
+            if need_handler:
+                fh = RotatingFileHandler(log_path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+                fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+                fh.setFormatter(fmt)
+                self._logger.addHandler(fh)
+                self._logger.propagate = False
+        except Exception:
+            try:
+                self._logger = logging.getLogger("trading_file_logger")
+                if not self._logger.handlers:
+                    self._logger.addHandler(logging.NullHandler())
+            except Exception:
+                pass
 
         # 若为实盘：
         # - 初始保证金 = 合约总保证金余额（wallet + 未实现盈亏）
@@ -217,6 +247,33 @@ class TradingEngine:
             )
             """
         )
+        # 系统元信息：记录数据库初始化时间，供“交易时长”展示使用
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_time INTEGER
+            )
+            """
+        )
+        # 若不存在初始化时间，则写入当前时间；存在则沿用
+        try:
+            cur.execute("SELECT start_time FROM meta ORDER BY id ASC LIMIT 1")
+            r = cur.fetchone()
+            if not r or (r[0] is None):
+                st = int(time.time() * 1000)
+                cur.execute("INSERT INTO meta(start_time) VALUES (?)", (st,))
+                self.db_start_ms = st
+            else:
+                self.db_start_ms = int(r[0])
+        except Exception:
+            # 兜底：若查询失败则以当前时间作为起点（不会影响已存在数据）
+            try:
+                st = int(time.time() * 1000)
+                cur.execute("INSERT INTO meta(start_time) VALUES (?)", (st,))
+                self.db_start_ms = st
+            except Exception:
+                self.db_start_ms = int(time.time() * 1000)
         self._db.commit()
 
     def _restore_balance_from_wallet(self):
@@ -441,6 +498,13 @@ class TradingEngine:
         if ema_curr is None or ma_curr is None:
             return
 
+        # 触发交叉时写文件日志（含是否最终收盘事件）
+        try:
+            if cross.golden_cross or cross.death_cross:
+                self._log(f"[CROSS] ts={close_time} final={bool(k.get('is_final', False))} golden={cross.golden_cross} death={cross.death_cross} price={price:.2f} ema={ema_curr:.2f} ma={ma_curr:.2f}")
+        except Exception:
+            pass
+
         # 轻量日志，便于观察实时更新
         if self.enable_tick_log:
             try:
@@ -599,6 +663,10 @@ class TradingEngine:
         self._clear_position()
         self._save_position()
         print(f"[OPEN] {side} price={exec_price:.2f} qty={exec_qty:.6f} fee={fee:.4f} bal={self.balance:.2f}")
+        try:
+            self._log(f"[OPEN] {side} price={exec_price:.2f} qty={exec_qty:.6f} fee={fee:.4f} bal={self.balance:.2f}")
+        except Exception:
+            pass
 
     def _close_position(self, price: float) -> bool:
         if self.position.side is None or self.position.entry_price is None or self.position.qty is None:
@@ -667,10 +735,20 @@ class TradingEngine:
         self._insert_trade("CLOSE", exec_price, exec_qty, fee, net_pnl)
         self._insert_wallet()
         print(f"[CLOSE] {side} @ {exec_price:.2f} gross_pnl={pnl:.4f} fee_close={fee:.4f} fee_open={open_fee:.4f} net_pnl={net_pnl:.4f} bal={self.balance:.2f}")
+        try:
+            self._log(f"[CLOSE] {side} @ {exec_price:.2f} gross_pnl={pnl:.4f} fee_close={fee:.4f} fee_open={open_fee:.4f} net_pnl={net_pnl:.4f} bal={self.balance:.2f}")
+        except Exception:
+            pass
         self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
         # 清除未平仓持仓记录
         self._clear_position()
         return True
+
+    def _log(self, msg: str):
+        try:
+            self._logger.info(msg)
+        except Exception:
+            pass
 
     # --------------------- Status ---------------------
     def status(self) -> dict:

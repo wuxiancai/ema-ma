@@ -54,13 +54,13 @@ class BinanceWebSocket:
     def _on_message(self, _ws, message: str):
         try:
             data = json.loads(message)
-            # combined stream: { stream, data: { k: {...} } }
+            # combined stream: { stream, data: { e, E, k: {...} } }
             kline_container = data.get("data") if "data" in data else data
             k = (kline_container or {}).get("k", {})
             if not k:
                 return
             payload = {
-                "event_time": data.get("E"),
+                "event_time": (kline_container or {}).get("E"),
                 "open_time": k.get("t"),
                 "close_time": k.get("T"),
                 "interval": k.get("i"),
