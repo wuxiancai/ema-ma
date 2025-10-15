@@ -1088,10 +1088,19 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               // 根据最新未收盘K线的时间戳触发图表刷新，并保留当前视图范围
               const k = s.latest_kline || {};
               const ts = Number(k.close_time);
+              const isFinal = !!k.is_final;
               const nowMs = Date.now();
-              const shouldUpdate = (
-                isFinite(ts) && (LAST_K_TS === null || ts !== LAST_K_TS)
-              ) || (nowMs - LAST_CHART_UPDATE_MS > 1500); // 若时间未变也每 ~1.5s 刷一次以体现未收盘价格变化
+              let shouldUpdate = false;
+              // 收盘事件：强制刷新一次，保证最新已收盘蜡烛进入图表
+              if (isFinal && (LAST_K_TS === null || ts >= LAST_K_TS)) {
+                shouldUpdate = true;
+              }
+              // 回退：时间戳变化或定时刷新以体现未收盘价格变化
+              if (!shouldUpdate) {
+                shouldUpdate = (
+                  isFinite(ts) && (LAST_K_TS === null || ts !== LAST_K_TS)
+                ) || (nowMs - LAST_CHART_UPDATE_MS > 1500);
+              }
               if (!RELOADING && shouldUpdate) {
                 LAST_K_TS = ts;
                 LAST_CHART_UPDATE_MS = nowMs;
