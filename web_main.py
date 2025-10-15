@@ -489,7 +489,12 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             /* K线图容器尺寸 */
             #plot_kline { width: 100%; height: 420px; }
             /* K线图标题左对齐，避免与悬停条冲突 */
-            #title_kline { text-align: left; padding-left: 12px; }
+            #title_kline { text-align: left; padding: 0 40px 0 12px; }
+            /* K线标题三列同排：左（品种与指标）、中（系统信息居中）、右（日期右对齐） */
+            #title_kline .chart-header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; column-gap: 10ch; white-space: nowrap; }
+            #title_kline .header-left { color: #0f172a; font-size: 14px; }
+            #title_kline .header-center { text-align: center; }
+            #title_kline .header-right { text-align: right; }
             /* 顶部悬停信息条 */
             .hoverbar {
               position: absolute; top: 16px; right: 24px; left: auto;
@@ -517,6 +522,9 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             }
             .kmeta .left { margin-left: 40px; }
             .kmeta .right { margin-left: auto; text-align: right; margin-right: 40px; }
+
+            /* 旧的覆盖层不再使用（避免与标题重叠） */
+            .chart-meta { display: none; }
 
             /* 表格：极细边与行悬停微亮 */
             table { width: 100%; border-collapse: collapse; border: 0; }
@@ -566,6 +574,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               <h2 id="title_kline">K 线图</h2>
               <div id="plot_kline"></div>
               <div id="hoverbar" class="hoverbar"></div>
+              <div id="chart_meta" class="chart-meta"></div>
             </div>
             <div class="card">
               <h2>系统参数配置</h2>
@@ -599,6 +608,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
           let LAST_K_TS = null;        // 最近一次渲染的最新K线收盘时间
           let LAST_CHART_UPDATE_MS = 0; // 简单节流，避免过于频繁刷新图表
           let RELOADING = false;
+          let LAST_STATUS = null;       // 缓存最近一次服务端推送的状态
           // 悬停与最新 K 线的实时刷新所需的全局状态
           let K_TIMES = [];
           let K_CLOSE = [];
@@ -744,14 +754,40 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                 } catch(e) { console.warn(e); }
               });
               plot.on('plotly_unhover', () => { CURRENT_HOVER_INDEX = null; if (hoverbar) hoverbar.style.display = 'none'; });
-              // 将“BTCUSDT 5m · EMA/MA”移动到标题后面显示
+              // 标题只初始化一次；后续仅更新左列，避免每次刷新清空中/右列造成闪烁
               const title = document.getElementById('title_kline');
               if (title) {
-                title.innerHTML = `<span style="font-size:14px;margin-left:8px;color:#0f172a;">
-                  ${d.symbol} ${d.interval} · 
-                  <span style="display:inline-block;width:14px;border-top:2px solid #106697;margin-right:4px;vertical-align:middle;"></span>EMA(${d.ema_period}) · 
-                  <span style="display:inline-block;width:14px;border-top:2px solid #f59e0b;margin-right:4px;vertical-align:middle;"></span>MA(${d.ma_period})
-                </span>`;
+                const leftHtml = `
+                    ${d.symbol} ${d.interval} · 
+                    <span style="display:inline-block;width:14px;border-top:2px solid #106697;margin-right:4px;vertical-align:middle;"></span>EMA(${d.ema_period}) · 
+                    <span style="display:inline-block;width:14px;border-top:2px solid #f59e0b;margin-right:4px;vertical-align:middle;"></span>MA(${d.ma_period})`;
+              const header = title.querySelector('.chart-header');
+              if (!header) {
+                title.innerHTML = `<div class="chart-header">
+                  <span class="header-left">${leftHtml}</span>
+                  <span id="header-center" class="header-center"></span>
+                  <span id="header-right" class="header-right"></span>
+                </div>`;
+                // 首次创建后，若中心/右侧为空，则用最近状态或占位值立即填充，确保首屏显示
+                try {
+                  const hcEl = document.getElementById('header-center');
+                  const hrEl = document.getElementById('header-right');
+                  if (hcEl && (hcEl.textContent||'').trim() === '') {
+                    const sys0 = (LAST_STATUS && LAST_STATUS.sysinfo) || {};
+                    const mem0 = fmtBytes(sys0.mem_available_bytes);
+                    const disk0 = fmtBytes(sys0.disk_free_bytes);
+                    hcEl.innerHTML = `⚙️ CPU <code>${fmtPct(sys0.cpu_percent)}</code> · 内存余:<code>${mem0}</code> · 磁盘余:<code>${disk0}</code>`;
+                  }
+                  if (hrEl && (hrEl.textContent||'').trim() === '') {
+                    const dt0 = (LAST_STATUS && LAST_STATUS.server_time) ? new Date(Number(LAST_STATUS.server_time)) : new Date();
+                    hrEl.innerHTML = `⏰ <code>${dt0.toLocaleString()}</code>`;
+                  }
+                } catch(_) {}
+              } else {
+                const hl = title.querySelector('.header-left');
+                if (hl) hl.innerHTML = leftHtml;
+                // 不触碰 header-center / header-right，确保其内容由 render(s) 更新且保持稳定
+              }
               }
             } catch (e) { console.error(e); }
           }
@@ -769,9 +805,12 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
               ? `<code class="red" style="font-weight:700">${memLeft}</code>`
               : `<code>${memLeft}</code>`;
             document.getElementById('kmeta').innerHTML = `
-              <div class="left">⏰ <code>${new Date(s.server_time).toLocaleString()}</code></div>
-              <div class="right">⚙️ CPU <code>${fmtPct(sys.cpu_percent)}</code> · 内存余:${memLeftHtml} · 磁盘余:<code>${diskLeft}</code></div>
+              <!-- 移除原位置的显示（改到 K 线图覆盖层） -->
             `;
+            const hc = document.getElementById('header-center');
+            const hr = document.getElementById('header-right');
+            if (hc) hc.innerHTML = `⚙️ CPU <code>${fmtPct(sys.cpu_percent)}</code> · 内存余:${memLeftHtml} · 磁盘余:<code>${diskLeft}</code>`;
+            if (hr) hr.innerHTML = `⏰ <code>${new Date(s.server_time).toLocaleString()}</code>`;
             // 配置汇总（不展示 API 密钥），以单行在“系统参数配置”卡片中显示。
             if (s.config) {
               const cfg = s.config || {};
@@ -965,13 +1004,20 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
             }
             // 不再渲染 (s.recent_klines) 的其它历史行
           }
-          // 首屏初始化一次
-          (async () => { const r = await fetch('/status'); const s = await r.json(); render(s); renderChart(); })();
+          // 首屏初始化：先创建图表与标题容器，再填充状态，避免首次不显示
+          (async () => {
+            await renderChart();
+            const r = await fetch('/status');
+            const s = await r.json();
+            LAST_STATUS = s;
+            render(s);
+          })();
           // 订阅服务端事件，实现与 Binance WS 同步节奏的实时更新
           const es = new EventSource('/events/status');
           es.onmessage = (e) => {
             try {
               const s = JSON.parse(e.data);
+              LAST_STATUS = s;
               render(s);
               // 根据最新未收盘K线的时间戳触发图表刷新，并保留当前视图范围
               const k = s.latest_kline || {};
