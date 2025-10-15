@@ -308,18 +308,66 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
         rows = engine.recent_klines(limit)
         # recent_klines 返回按 id DESC（时间倒序），此处转为时间升序供前端使用
         rows_asc = list(reversed(rows))
-        ts = [r['close_time'] for r in rows_asc]
+
+        # 叠加未收盘最新K线（仅展示，不入库）：
+        # 若 latest_kline 的 close_time 严格晚于数据库中最后一根，则追加到图表数据末尾。
+        latest = getattr(engine, 'latest_kline', None)
+        append_latest = False
+        try:
+            if latest and isinstance(latest, dict):
+                last_db_ct = int(rows_asc[-1]['close_time']) if rows_asc else None
+                latest_ct = int(latest.get('close_time'))
+                # 仅当 latest 的时间严格晚于最后一根已收盘K线时追加，避免重复
+                append_latest = (last_db_ct is None) or (latest_ct > last_db_ct)
+        except Exception:
+            append_latest = False
+
+        ts = [int(r['close_time']) for r in rows_asc]
         opens = [float(r['open']) for r in rows_asc]
         highs = [float(r['high']) for r in rows_asc]
         lows = [float(r['low']) for r in rows_asc]
         closes = [float(r['close']) for r in rows_asc]
         vols = [float(r.get('volume', 0.0)) for r in rows_asc]
-        # 计算 EMA/MA：使用引擎完整历史（data_period_days）计算的序列，随后截取最后 N 根
-        N = len(rows_asc)
+
+        if append_latest:
+            try:
+                ts.append(int(latest.get('close_time')))
+                opens.append(float(latest.get('open')))
+                highs.append(float(latest.get('high')))
+                lows.append(float(latest.get('low')))
+                closes.append(float(latest.get('close')))
+                vols.append(float(latest.get('volume', 0.0)))
+            except Exception:
+                # 若 latest 字段异常则跳过追加
+                pass
+
+        # 对齐 EMA/MA 到时间轴：根据引擎 timestamps 建立索引，缺失处填 None。
         ema_full = getattr(engine, 'ema_list', []) or []
         ma_full = getattr(engine, 'ma_list', []) or []
-        ema_list = (ema_full[-N:] if len(ema_full) >= N else ema_full)
-        ma_list = (ma_full[-N:] if len(ma_full) >= N else ma_full)
+        ts_full = getattr(engine, 'timestamps', []) or []
+        idx_by_ts = {}
+        try:
+            idx_by_ts = {int(ts_full[i]): i for i in range(len(ts_full))}
+        except Exception:
+            idx_by_ts = {}
+
+        ema_list: list = []
+        ma_list: list = []
+        for t in ts:
+            i = idx_by_ts.get(int(t))
+            if i is None or i < 0 or i >= len(ema_full) or i >= len(ma_full):
+                ema_list.append(None)
+                ma_list.append(None)
+            else:
+                try:
+                    ema_list.append(float(ema_full[i]))
+                except Exception:
+                    ema_list.append(None)
+                try:
+                    ma_list.append(float(ma_full[i]))
+                except Exception:
+                    ma_list.append(None)
+
         return jsonify({
             'symbol': engine.symbol,
             'interval': engine.interval,
