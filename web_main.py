@@ -368,6 +368,24 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                 except Exception:
                     ma_list.append(None)
 
+        # 若已追加未收盘蜡烛，则为最后一根计算“临时 EMA/MA”，以便图上连到最新点。
+        # - 在 use_closed_only=true 时，引擎不会推进指标；这里仅用于展示，不影响交易逻辑。
+        # - 在 use_closed_only=false 时，引擎已计算到最新，映射阶段会填充，不需要额外处理。
+        try:
+            if append_latest:
+                # 仅当末尾仍为 None（表示映射阶段没有现成指标）时计算临时值
+                if ema_list and ema_list[-1] is None:
+                    latest_close = float(latest.get('close'))
+                    closes_full = (getattr(engine, 'closes', []) or []) + [latest_close]
+                    # 重新计算一次末尾指标（开销可接受，确保与指标模块一致）
+                    ema_full2 = calc_ema(closes_full, engine.ema_period)
+                    sma_full2 = calc_sma(closes_full, engine.ma_period)
+                    ema_list[-1] = (float(ema_full2[-1]) if ema_full2 and ema_full2[-1] is not None else None)
+                    ma_list[-1] = (float(sma_full2[-1]) if sma_full2 and sma_full2[-1] is not None else None)
+        except Exception:
+            # 指标临时计算失败时，保持 None，避免前端报错
+            pass
+
         return jsonify({
             'symbol': engine.symbol,
             'interval': engine.interval,
