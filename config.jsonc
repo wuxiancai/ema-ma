@@ -3,7 +3,7 @@
   "trading": {
     "api_key": "yHEbiLZVNTpX81Vc6UYPJpIsPFa6P461R1OVHHq7JcLs60B4GPcVSEq7Chw8OCGG",             // 币安 API Key（仅真实交易时使用）
     "secret_key": "gwbbkf4uCPTJbMH6M3QZFJ4qtkqqzasg28vVZb20nkWwe7kDCZsSRSMjidHCb3Th",          // 币安 Secret Key（与 api_key 配对）
-    "test_mode": true,          // 模拟交易开关：true=仅本地计算盈亏，不下真实单
+    "test_mode": false,          // 模拟交易开关：true=仅本地计算盈亏，不下真实单
     "initial_balance": 1000.0,  // 初始资金（USDT，仅模拟模式）
     "percent": 0.8,             // 每次开仓使用当前余额比例（0~1），如 0.5=50%
     "leverage": 20,             // 杠杆倍数，例如 10 表示 10x
