@@ -521,13 +521,41 @@ class TradingEngine:
             if cond_long:
                 if self.enable_signal_debug_log:
                     print(f"[OPEN-CHECK] LONG ok: price>{ema_curr:.2f} ema>{ma_curr:.2f} rising={ema_rising} slope_on={self.use_slope}")
-                self._open_position("LONG", price)
+                # 开多前检查实盘是否已有多仓（仅收盘事件时严格检查）
+                if bool(k.get("is_final", False)) and (not self.test_mode) and self._client_auth:
+                    try:
+                        rp_long = self._client_auth.get_futures_position(self.symbol, prefer_side="LONG")
+                        has_long = bool(rp_long and rp_long.get("positionAmt") is not None and abs(float(rp_long.get("positionAmt"))) > 0)
+                        if has_long:
+                            msg = "[OPEN-SKIP] 检测到实盘持有多仓，跳过开多"
+                            print(msg)
+                            self._log(msg)
+                        else:
+                            self._open_position("LONG", price)
+                    except Exception:
+                        self._open_position("LONG", price)
+                else:
+                    self._open_position("LONG", price)
             elif cross.golden_cross and self.enable_signal_debug_log:
                 print(f"[OPEN-CHECK] LONG miss: price>{ema_curr:.2f}={price>ema_curr} ema>{ma_curr:.2f}={ema_curr>ma_curr} rising={ema_rising} slope_on={self.use_slope}")
             if cond_short:
                 if self.enable_signal_debug_log:
                     print(f"[OPEN-CHECK] SHORT ok: price<{ema_curr:.2f} ema<{ma_curr:.2f} rising={ema_rising} slope_on={self.use_slope}")
-                self._open_position("SHORT", price)
+                # 开空前检查实盘是否已有空仓（仅收盘事件时严格检查）
+                if bool(k.get("is_final", False)) and (not self.test_mode) and self._client_auth:
+                    try:
+                        rp_short = self._client_auth.get_futures_position(self.symbol, prefer_side="SHORT")
+                        has_short = bool(rp_short and rp_short.get("positionAmt") is not None and abs(float(rp_short.get("positionAmt"))) > 0)
+                        if has_short:
+                            msg = "[OPEN-SKIP] 检测到实盘持有空仓，跳过开空"
+                            print(msg)
+                            self._log(msg)
+                        else:
+                            self._open_position("SHORT", price)
+                    except Exception:
+                        self._open_position("SHORT", price)
+                else:
+                    self._open_position("SHORT", price)
             elif cross.death_cross and self.enable_signal_debug_log:
                 print(f"[OPEN-CHECK] SHORT miss: price<{ema_curr:.2f}={price<ema_curr} ema<{ma_curr:.2f}={ema_curr<ma_curr} rising={ema_rising} slope_on={self.use_slope}")
         else:
@@ -543,26 +571,78 @@ class TradingEngine:
             #    - 说明：use_closed_only=true 时，交叉仅在收盘触发；false 时，未收盘也可能触发，频次更高。
             if self.position.side == "LONG":
                 if cross.death_cross:
-                    # 死叉：先平多，若平仓成功再反向开空
-                    closed = self._close_position(price)
-                    if closed:
-                        self._open_position("SHORT", price)
-                    else:
+                    # 死叉：收盘时严格检查实盘是否持有多仓
+                    if bool(k.get("is_final", False)) and (not self.test_mode) and self._client_auth:
                         try:
-                            print("[CLOSE->OPEN] skipped reverse open due to close failure")
+                            rp_long = self._client_auth.get_futures_position(self.symbol, prefer_side="LONG")
+                            has_long = bool(rp_long and rp_long.get("positionAmt") is not None and abs(float(rp_long.get("positionAmt"))) > 0)
+                            if not has_long:
+                                msg = "[CLOSE-SKIP] 未持有多仓，跳过平多交易"
+                                print(msg)
+                                self._log(msg)
+                            else:
+                                # 用实盘仓位同步本地后再平仓
+                                try:
+                                    self.position = Position(side="LONG", entry_price=(float(rp_long.get("entryPrice")) if rp_long.get("entryPrice") is not None else self.position.entry_price), qty=abs(float(rp_long.get("positionAmt"))), open_fee=float(self.position.open_fee or 0.0))
+                                except Exception:
+                                    pass
+                                closed = self._close_position(price)
+                                if closed:
+                                    # 平多后，若已存在空仓则跳过开空
+                                    rp_short2 = self._client_auth.get_futures_position(self.symbol, prefer_side="SHORT")
+                                    has_short2 = bool(rp_short2 and rp_short2.get("positionAmt") is not None and abs(float(rp_short2.get("positionAmt"))) > 0)
+                                    if has_short2:
+                                        msg2 = "[OPEN-SKIP] 检测到实盘持有空仓，跳过开空"
+                                        print(msg2)
+                                        self._log(msg2)
+                                    else:
+                                        self._open_position("SHORT", price)
                         except Exception:
-                            pass
+                            # 出现异常则按本地逻辑执行
+                            closed = self._close_position(price)
+                            if closed:
+                                self._open_position("SHORT", price)
+                    else:
+                        closed = self._close_position(price)
+                        if closed:
+                            self._open_position("SHORT", price)
             elif self.position.side == "SHORT":
                 if cross.golden_cross:
-                    # 金叉：先平空，若平仓成功再反向开多
-                    closed = self._close_position(price)
-                    if closed:
-                        self._open_position("LONG", price)
-                    else:
+                    # 金叉：收盘时严格检查实盘是否持有空仓
+                    if bool(k.get("is_final", False)) and (not self.test_mode) and self._client_auth:
                         try:
-                            print("[CLOSE->OPEN] skipped reverse open due to close failure")
+                            rp_short = self._client_auth.get_futures_position(self.symbol, prefer_side="SHORT")
+                            has_short = bool(rp_short and rp_short.get("positionAmt") is not None and abs(float(rp_short.get("positionAmt"))) > 0)
+                            if not has_short:
+                                msg = "[CLOSE-SKIP] 未持有空仓，跳过平空交易"
+                                print(msg)
+                                self._log(msg)
+                            else:
+                                # 用实盘仓位同步本地后再平仓
+                                try:
+                                    self.position = Position(side="SHORT", entry_price=(float(rp_short.get("entryPrice")) if rp_short.get("entryPrice") is not None else self.position.entry_price), qty=abs(float(rp_short.get("positionAmt"))), open_fee=float(self.position.open_fee or 0.0))
+                                except Exception:
+                                    pass
+                                closed = self._close_position(price)
+                                if closed:
+                                    # 平空后，若已存在多仓则跳过开多
+                                    rp_long2 = self._client_auth.get_futures_position(self.symbol, prefer_side="LONG")
+                                    has_long2 = bool(rp_long2 and rp_long2.get("positionAmt") is not None and abs(float(rp_long2.get("positionAmt"))) > 0)
+                                    if has_long2:
+                                        msg2 = "[OPEN-SKIP] 检测到实盘持有多仓，跳过开多"
+                                        print(msg2)
+                                        self._log(msg2)
+                                    else:
+                                        self._open_position("LONG", price)
                         except Exception:
-                            pass
+                            # 出现异常则按本地逻辑执行
+                            closed = self._close_position(price)
+                            if closed:
+                                self._open_position("LONG", price)
+                    else:
+                        closed = self._close_position(price)
+                        if closed:
+                            self._open_position("LONG", price)
 
         # 收盘时落库
         if bool(k.get("is_final", False)):

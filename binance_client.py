@@ -181,7 +181,7 @@ class BinanceClient:
         except Exception:
             return None
 
-    def get_futures_position(self, symbol: str, recv_window_ms: int = 5000) -> dict | None:
+    def get_futures_position(self, symbol: str, recv_window_ms: int = 5000, prefer_side: str | None = None) -> dict | None:
         """查询指定交易对的合约持仓信息（USDⓈ-M）。
 
         来源：GET /fapi/v2/account（签名）。该接口返回 positions 列表。
@@ -220,8 +220,21 @@ class BinanceClient:
                     return float(v) if v is not None else 0.0
                 except Exception:
                     return 0.0
-            non_zero = [p for p in positions if abs(amt_of(p)) > 0]
-            chosen = (non_zero[0] if non_zero else positions[0])
+            chosen = None
+            # 若指定 prefer_side（LONG/SHORT/BOTH），优先选择该方向的记录
+            try:
+                if isinstance(prefer_side, str) and prefer_side:
+                    ps = prefer_side.strip().upper()
+                    candidates = [p for p in positions if str(p.get("positionSide")).upper() == ps]
+                    if candidates:
+                        nz = [p for p in candidates if abs(amt_of(p)) > 0]
+                        chosen = (nz[0] if nz else candidates[0])
+            except Exception:
+                chosen = None
+            # 回退：优先选择仓位数量非 0 的记录，否则取第一条（通常为 BOTH）
+            if chosen is None:
+                non_zero = [p for p in positions if abs(amt_of(p)) > 0]
+                chosen = (non_zero[0] if non_zero else positions[0])
             out: dict = {
                 "positionAmt": float(chosen.get("positionAmt")) if chosen.get("positionAmt") is not None else None,
                 "entryPrice": float(chosen.get("entryPrice")) if chosen.get("entryPrice") is not None else None,
