@@ -14,7 +14,10 @@
     "base_url": "https://fapi.binance.com", // 币安合约 API 基础 URL
     "enable_tick_log": false,            // 是否打印高频 [TICK] 日志（默认关闭）
     "enable_signal_debug_log": true,     // 是否打印开仓信号调试日志（默认关闭）
-    "auto_set_dual_side": true          // 启动后自动检查并开启双向持仓（hedge mode）
+    "auto_set_dual_side": true,         // 启动后自动检查并开启双向持仓（hedge mode）
+    // 确认等待窗口：类似 WebDriverWait，在该超时内轮询持仓状态直至达成
+    "confirm_timeout_sec": 5.0,         // 单次确认超时（秒），如 2.0 秒
+    "confirm_poll_interval_sec": 0.25   // 轮询间隔（秒），如 0.25 秒
   },
 
   // 指标参数（均线与信号判断）

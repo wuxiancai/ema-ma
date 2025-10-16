@@ -14,7 +14,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Callable
 import math
 import logging
 from logging.handlers import RotatingFileHandler
@@ -60,6 +60,11 @@ class TradingEngine:
         self.ema_list: list[float] = []
         self.ma_list: list[float] = []
         self.latest_kline: dict | None = None  # 未收盘的实时K线（完整O/H/L/C/Vol）
+        # 交叉日志去抖：仅当金叉/死叉状态发生变化时写日志
+        self._last_cross_tag: str | None = None  # 'GOLDEN' | 'DEATH' | None
+        # 确认等待配置（类似 WebDriverWait）：在一个较短的超时时间内轮询条件达成
+        self.confirm_timeout_sec: float = float(tcfg.get("confirm_timeout_sec", 2.0))
+        self.confirm_poll_interval_sec: float = float(tcfg.get("confirm_poll_interval_sec", 0.25))
         # 计算选项
         icfg = config.get("indicators", {})
         # 是否仅使用已收盘K线参与均线计算（更贴近多数交易所图表）
@@ -541,10 +546,12 @@ class TradingEngine:
         if ema_curr is None or ma_curr is None:
             return
 
-        # 触发交叉时写文件日志（含是否最终收盘事件）
+        # 交叉日志：仅在状态从非交叉变为金叉/死叉或在金叉↔死叉切换时记录，避免秒级刷屏
         try:
-            if cross.golden_cross or cross.death_cross:
+            cross_tag = ("GOLDEN" if cross.golden_cross else ("DEATH" if cross.death_cross else None))
+            if cross_tag and (cross_tag != self._last_cross_tag):
                 self._log(f"[CROSS] ts={close_time} final={bool(k.get('is_final', False))} golden={cross.golden_cross} death={cross.death_cross} price={price:.2f} ema={ema_curr:.2f} ma={ma_curr:.2f}")
+                self._last_cross_tag = cross_tag
         except Exception:
             pass
 
@@ -943,7 +950,7 @@ class TradingEngine:
         self._clear_position()
         return True
 
-    def _open_with_confirm(self, side: str, price: float, *, max_retries: int = 3, delay_sec: float = 0.8) -> bool:
+    def _open_with_confirm(self, side: str, price: float, *, max_retries: int = 5, delay_sec: float = 0.8) -> bool:
         """开仓并确认成功；若失败或未持仓则重试。仅在实盘开启 API 时执行确认。"""
         for attempt in range(1, int(max_retries) + 1):
             ok = self._open_position(side, price)
@@ -954,16 +961,18 @@ class TradingEngine:
                     pass
                 time.sleep(delay_sec)
                 continue
-            # 验证持仓（仅实盘）
+            # 验证持仓（仅实盘）：WebDriverWait 风格的轮询确认
             if (not self.test_mode) and self._client_auth:
                 try:
                     prefer = (side if self._dual_side else None)
-                    rp = self._client_auth.get_futures_position(self.symbol, prefer_side=prefer)
-                    has_pos = bool(rp and rp.get("positionAmt") is not None and abs(float(rp.get("positionAmt"))) > 0)
-                    if has_pos:
+                    def check_fn() -> bool:
+                        rp = self._client_auth.get_futures_position(self.symbol, prefer_side=prefer)
+                        return bool(rp and rp.get("positionAmt") is not None and abs(float(rp.get("positionAmt"))) > 0)
+                    ok_confirm = self._wait_until(check_fn, timeout_sec=self.confirm_timeout_sec, poll_interval_sec=self.confirm_poll_interval_sec)
+                    if ok_confirm:
                         return True
                     else:
-                        msg = f"[OPEN-CHECK] no position detected after open, attempt {attempt}"
+                        msg = f"[OPEN-CHECK] no position detected within {self.confirm_timeout_sec:.1f}s, attempt {attempt}"
                         print(msg)
                         try:
                             self._log(msg)
@@ -976,7 +985,7 @@ class TradingEngine:
             time.sleep(delay_sec)
         return False
 
-    def _close_with_confirm(self, prev_side: str, price: float, *, max_retries: int = 3, delay_sec: float = 0.8) -> bool:
+    def _close_with_confirm(self, prev_side: str, price: float, *, max_retries: int = 5, delay_sec: float = 0.8) -> bool:
         """平仓并确认已清仓；若失败或仍有仓位则重试。"""
         for attempt in range(1, int(max_retries) + 1):
             ok = self._close_position(price)
@@ -987,16 +996,27 @@ class TradingEngine:
                     pass
                 time.sleep(delay_sec)
                 continue
-            # 验证清仓（仅实盘）
+            # 验证清仓（仅实盘）：WebDriverWait 风格的轮询确认
             if (not self.test_mode) and self._client_auth:
                 try:
                     prefer = (prev_side if self._dual_side else None)
-                    rp = self._client_auth.get_futures_position(self.symbol, prefer_side=prefer)
-                    has_pos = bool(rp and rp.get("positionAmt") is not None and abs(float(rp.get("positionAmt"))) > 0)
-                    if not has_pos:
+                    def check_fn() -> bool:
+                        rp = self._client_auth.get_futures_position(self.symbol, prefer_side=prefer)
+                        has_pos = bool(rp and rp.get("positionAmt") is not None and abs(float(rp.get("positionAmt"))) > 0)
+                        # 若仍有仓位则在轮询过程中同步一次本地剩余仓位，便于下一轮重试继续减仓
+                        if has_pos:
+                            try:
+                                resid_amt = abs(float(rp.get("positionAmt")))
+                                resid_entry = (float(rp.get("entryPrice")) if rp.get("entryPrice") is not None else (self.position.entry_price or 0.0))
+                                self.position = Position(side=prev_side, entry_price=resid_entry, qty=resid_amt, open_fee=float(self.position.open_fee or 0.0))
+                            except Exception:
+                                pass
+                        return (not has_pos)
+                    ok_confirm = self._wait_until(check_fn, timeout_sec=self.confirm_timeout_sec, poll_interval_sec=self.confirm_poll_interval_sec)
+                    if ok_confirm:
                         return True
                     else:
-                        msg = f"[CLOSE-CHECK] position remains after close, attempt {attempt}"
+                        msg = f"[CLOSE-CHECK] position remains within {self.confirm_timeout_sec:.1f}s, attempt {attempt}"
                         print(msg)
                         try:
                             self._log(msg)
@@ -1008,6 +1028,23 @@ class TradingEngine:
                 return True
             time.sleep(delay_sec)
         return False
+
+    def _wait_until(self, check_fn: Callable[[], bool], *, timeout_sec: float, poll_interval_sec: float) -> bool:
+        """简易 WebDriverWait：在 timeout_sec 时间窗口内以 poll_interval_sec 周期轮询 check_fn。
+        条件满足返回 True；超时返回 False。
+        """
+        deadline = time.time() + max(0.0, float(timeout_sec))
+        interval = max(0.05, float(poll_interval_sec))
+        while True:
+            try:
+                if check_fn():
+                    return True
+            except Exception:
+                # 检查函数异常时继续轮询，避免单次失败阻断整体流程
+                pass
+            if time.time() >= deadline:
+                return False
+            time.sleep(interval)
 
     def _log(self, msg: str):
         try:
