@@ -634,6 +634,19 @@ class TradingEngine:
                                 msg = "[CLOSE-SKIP] 未持有多仓，跳过平多交易"
                                 print(msg)
                                 self._log(msg)
+                                # 若实盘已无多仓，视为已清仓：同步本地为无持仓，并直接尝试反手开空
+                                try:
+                                    self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
+                                except Exception:
+                                    pass
+                                rp_short2 = self._client_auth.get_futures_position(self.symbol, prefer_side="SHORT")
+                                has_short2 = bool(rp_short2 and rp_short2.get("positionAmt") is not None and abs(float(rp_short2.get("positionAmt"))) > 0)
+                                if has_short2:
+                                    msg2 = "[OPEN-SKIP] 检测到实盘持有空仓，跳过开空"
+                                    print(msg2)
+                                    self._log(msg2)
+                                else:
+                                    self._open_with_confirm("SHORT", price)
                             else:
                                 # 用实盘仓位同步本地后再平仓
                                 try:
@@ -671,6 +684,19 @@ class TradingEngine:
                                 msg = "[CLOSE-SKIP] 未持有空仓，跳过平空交易"
                                 print(msg)
                                 self._log(msg)
+                                # 若实盘已无空仓，视为已清仓：同步本地为无持仓，并直接尝试反手开多
+                                try:
+                                    self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
+                                except Exception:
+                                    pass
+                                rp_long2 = self._client_auth.get_futures_position(self.symbol, prefer_side="LONG")
+                                has_long2 = bool(rp_long2 and rp_long2.get("positionAmt") is not None and abs(float(rp_long2.get("positionAmt"))) > 0)
+                                if has_long2:
+                                    msg2 = "[OPEN-SKIP] 检测到实盘持有多仓，跳过开多"
+                                    print(msg2)
+                                    self._log(msg2)
+                                else:
+                                    self._open_with_confirm("LONG", price)
                             else:
                                 # 用实盘仓位同步本地后再平仓
                                 try:
