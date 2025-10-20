@@ -562,6 +562,27 @@ class TradingEngine:
             except Exception:
                 pass
 
+        # 实盘手动持仓同步：当本地无持仓时若API检测到仓位，立即同步
+        try:
+            if (not self.test_mode) and self._client_auth and (self.position.side is None):
+                rp_sync = self._client_auth.get_futures_position(self.symbol)
+                if isinstance(rp_sync, dict) and rp_sync.get("positionAmt") is not None:
+                    amt_sync = float(rp_sync.get("positionAmt"))
+                    if abs(amt_sync) > 0:
+                        side_sync = ("LONG" if amt_sync > 0 else "SHORT")
+                        entry_sync = float(rp_sync.get("entryPrice") or price)
+                        qty_sync = abs(amt_sync)
+                        self.position = Position(side=side_sync, entry_price=entry_sync, qty=qty_sync, open_fee=0.0)
+                        # 覆盖本地 position 表，保证重启后也能恢复
+                        self._clear_position()
+                        self._save_position()
+                        try:
+                            self._log(f"[SYNC-POS] manual detected: side={side_sync} entry={entry_sync:.2f} qty={qty_sync:.6f}")
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         # 若配置为仅收盘交易，则在未收盘事件直接退出（但仍记录交叉日志）
         if self.use_closed_only and (not bool(k.get("is_final", False))):
             return
@@ -813,14 +834,11 @@ class TradingEngine:
                 qty = floor_to_step(qty, step)
         except Exception:
             pass
-        # 2) 满足最小数量要求（LOT_SIZE/MARKET_LOT_SIZE）
-        try:
-            if isinstance(self._min_qty, (int, float)) and (self._min_qty or 0) > 0:
-                step = float(self._step_size or 0.001)
-                if qty < float(self._min_qty):
-                    qty = ceil_to_step(float(self._min_qty), step)
-        except Exception:
-            pass
+        # 2) 跳过最小数量限制，按步进与最小名义约束
+        # 说明：用户手动下单时交易所未强制 minQty，这里不再抬高数量到 minQty。
+        # 仍保留 LOT_SIZE 的步进与 MIN_NOTIONAL 校验，避免被拒单。
+        # （若交易所返回数量过小错误，可在配置中调高 percent/leverage）
+        # 此处不做数量上调处理，直接进入名义校验。
         # 3) 满足最小名义（MIN_NOTIONAL）：名义=价格×数量
         try:
             if isinstance(self._min_notional, (int, float)) and (self._min_notional or 0) > 0:
