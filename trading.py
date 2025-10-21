@@ -58,6 +58,8 @@ class TradingEngine:
         # 状态
         self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
         self.current_price: float | None = None
+        # 内存优化：限制内存中序列的最大长度（默认 2000）
+        self.series_maxlen: int = int(tcfg.get("series_maxlen", 2000))
         self.timestamps = deque(maxlen=self.series_maxlen)  # close_time
         self.closes = deque(maxlen=self.series_maxlen)
         self.ema_list = deque(maxlen=self.series_maxlen)
@@ -74,8 +76,6 @@ class TradingEngine:
         self.use_closed_only: bool = bool(icfg.get("use_closed_only", True))
         # 是否将 EMA/MA 斜率（趋势）纳入开仓条件
         self.use_slope: bool = bool(icfg.get("use_slope", True))
-        # 内存优化：限制内存中序列的最大长度（默认 2000）
-        self.series_maxlen: int = int(tcfg.get("series_maxlen", 2000))
 
         # 日志文件（项目目录下 trading.log）
         try:
