@@ -167,8 +167,29 @@ def start_ws(
                 pass
 
     def on_open():
-        # WS 连接成功（不再使用价格轮询回退）
-        pass
+        # WS 连接成功：用 REST 快速补齐断线期间缺失的收盘K线
+        try:
+            last_ct = None
+            try:
+                last_ct = engine.latest_db_close_time()
+            except Exception:
+                last_ct = None
+            chunk = client.get_klines(symbol=symbol, interval=interval, limit=1000)
+            if chunk:
+                miss = []
+                base = int(last_ct) if isinstance(last_ct, (int, float)) else None
+                for k in chunk:
+                    try:
+                        ct = int(k["close_time"])
+                        if (base is None) or (ct > base):
+                            miss.append(k)
+                    except Exception:
+                        pass
+                if miss:
+                    miss_sorted = sorted(miss, key=lambda x: int(x["close_time"]))
+                    engine.ingest_historical(miss_sorted)
+        except Exception:
+            pass
 
     def on_error(_err):
         # WS 异常（保持仅 WS 策略，不启用轮询）

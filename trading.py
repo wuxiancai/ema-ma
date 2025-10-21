@@ -423,6 +423,21 @@ class TradingEngine:
         except Exception:
             pass
 
+    def latest_db_close_time(self) -> int | None:
+        """查询当前品种与周期的最近一根收盘时间（毫秒）。"""
+        try:
+            cur = self._db.cursor()
+            cur.execute(
+                "SELECT close_time FROM klines WHERE symbol=? AND interval=? ORDER BY close_time DESC LIMIT 1",
+                (self.symbol, self.interval),
+            )
+            r = cur.fetchone()
+            if r and (r[0] is not None):
+                return int(r[0])
+            return None
+        except Exception:
+            return None
+
     def _insert_trade(self, side: str, price: float, qty: float, fee: float, pnl: float):
         cur = self._db.cursor()
         cur.execute(
@@ -895,9 +910,7 @@ class TradingEngine:
                         if closed:
                             self._open_with_confirm("LONG", price)
 
-        # 收盘时落库
-        if bool(k.get("is_final", False)):
-            self._insert_kline(k)
+        # 收盘入库逻辑已在各分支中处理（去重），此处移除重复插入。
 
     # --------------------- Trading Logic ---------------------
     def _notional_and_qty(self, price: float) -> tuple[float, float]:
