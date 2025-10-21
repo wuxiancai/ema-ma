@@ -299,6 +299,85 @@ def start_price_poller(engine: TradingEngine, client: BinanceClient, events_q: q
     return stop_flag
 
 
+def start_kline_reconciler(engine: TradingEngine, client: BinanceClient, events_q: queue.Queue | None = None, *, tz_offset_hours: int = 0, enable_poller: bool = False):
+    """运行期定期用 REST 回补缺失的收盘K线，避免必须重启。"""
+    stop_flag = threading.Event()
+
+    def _interval_to_ms(s: str) -> int:
+        try:
+            s = str(s).strip().lower()
+            num = int(re.sub(r"[^0-9]", "", s) or "1")
+            if s.endswith("ms"):
+                return max(1, num)
+            if s.endswith("s"):
+                return num * 1000
+            if s.endswith("m"):
+                return num * 60 * 1000
+            if s.endswith("h"):
+                return num * 3600 * 1000
+            if s.endswith("d"):
+                return num * 24 * 3600 * 1000
+            return num * 60 * 1000
+        except Exception:
+            return 60 * 1000
+
+    def run():
+        check_ms = max(15000, _interval_to_ms(engine.interval) // 2)
+        while not stop_flag.is_set():
+            try:
+                base = None
+                try:
+                    base = engine.latest_db_close_time()
+                except Exception:
+                    base = None
+                chunk = client.get_klines(symbol=engine.symbol, interval=engine.interval, limit=200)
+                if not chunk:
+                    time.sleep(check_ms / 1000.0)
+                    continue
+                miss: list[dict] = []
+                b = int(base) if isinstance(base, (int, float)) else None
+                for k in chunk:
+                    try:
+                        ct = int(k["close_time"]) if isinstance(k, dict) else int(k[6])
+                        if (b is None) or (ct > b):
+                            miss.append(k if isinstance(k, dict) else {
+                                "open_time": int(k[0]),
+                                "open": float(k[1]),
+                                "high": float(k[2]),
+                                "low": float(k[3]),
+                                "close": float(k[4]),
+                                "volume": float(k[5]),
+                                "close_time": ct,
+                            })
+                    except Exception:
+                        pass
+                if miss:
+                    miss_sorted = sorted(miss, key=lambda x: int(x["close_time"]))
+                    try:
+                        engine.ingest_historical(miss_sorted)
+                    except Exception:
+                        pass
+                    if events_q is not None:
+                        try:
+                            s = engine.status()
+                            s["recent_trades"] = engine.recent_trades(50)
+                            s["recent_klines"] = engine.recent_klines(5)
+                            s["server_time"] = int(time.time() * 1000)
+                            s["sysinfo"] = get_sysinfo()
+                            s["totals"] = engine.totals()
+                            s["config"] = get_config_summary(engine, tz_offset_hours, enable_poller)
+                            events_q.put_nowait(s)
+                        except Exception:
+                            pass
+                time.sleep(check_ms / 1000.0)
+            except Exception:
+                time.sleep(5)
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return stop_flag
+
+
 def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue.Queue, *, enable_poller: bool):
     app = Flask(__name__)
 
@@ -838,6 +917,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                     · MA: <b style="color:#f59e0b">${isFinite(maV)?maV.toFixed(1):'-'}</b>
                   `;
                   hoverbar.style.display = 'inline-block';
+                  hoverbar.style.display = 'inline-block';
                 } catch(e) { console.warn(e); }
               });
               plot.on('plotly_unhover', () => { CURRENT_HOVER_INDEX = null; if (hoverbar) hoverbar.style.display = 'none'; });
@@ -1230,6 +1310,13 @@ def main():
         enable_fallback_poller=False,
     )
     # 仅 WS 模式：不再启动价格轮询
+    reconciler = start_kline_reconciler(
+        engine,
+        client,
+        events_q=events_q,
+        tz_offset_hours=int(wcfg.get("timezone_offset_hours", 8)),
+        enable_poller=enable_poller,
+    )
 
     # 实盘模式下，若存在密钥，启动账户轮询，刷新钱包余额与保证金余额
     try:
