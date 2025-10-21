@@ -1358,6 +1358,6 @@ class TradingEngine:
 
     def recent_klines(self, limit: int = 5) -> list[dict]:
         cur = self._db.cursor()
-        cur.execute("SELECT * FROM klines ORDER BY id DESC LIMIT ?", (limit,))
+        cur.execute("SELECT * FROM klines ORDER BY close_time DESC LIMIT ?", (limit,))
         rows = cur.fetchall()
         return [dict(r) for r in rows]
