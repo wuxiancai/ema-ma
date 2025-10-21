@@ -408,6 +408,21 @@ class TradingEngine:
         )
         self._db.commit()
 
+    def _insert_kline_if_absent(self, k: dict):
+        """仅在数据库不存在该 close_time 的记录时插入，避免重复。"""
+        try:
+            ct = int(k["close_time"])
+            cur = self._db.cursor()
+            cur.execute(
+                "SELECT id FROM klines WHERE symbol=? AND interval=? AND close_time=? LIMIT 1",
+                (self.symbol, self.interval, ct),
+            )
+            r = cur.fetchone()
+            if not r:
+                self._insert_kline(k)
+        except Exception:
+            pass
+
     def _insert_trade(self, side: str, price: float, qty: float, fee: float, pnl: float):
         cur = self._db.cursor()
         cur.execute(
@@ -552,6 +567,19 @@ class TradingEngine:
                 else:
                     self.closes[-1] = price
                 self._update_indicators_incremental(appended=did_append)
+                # 收盘事件：写入数据库（去重）
+                try:
+                    self._insert_kline_if_absent({
+                        "open_time": int(k.get("open_time", close_time)),
+                        "close_time": close_time,
+                        "open": float(k.get("open", price)),
+                        "high": float(k.get("high", price)),
+                        "low": float(k.get("low", price)),
+                        "close": float(k.get("close", price)),
+                        "volume": float(k.get("volume", 0.0)),
+                    })
+                except Exception:
+                    pass
         else:
             # 未收盘也进入计算：更灵敏，但与交易所图略有差异
             did_append = (not self.timestamps or close_time != self.timestamps[-1])
@@ -561,6 +589,20 @@ class TradingEngine:
             else:
                 self.closes[-1] = price
             self._update_indicators_incremental(appended=did_append)
+            # 若为收盘事件，则写库（仅一次，去重）
+            if bool(k.get("is_final", False)):
+                try:
+                    self._insert_kline_if_absent({
+                        "open_time": int(k.get("open_time", close_time)),
+                        "close_time": close_time,
+                        "open": float(k.get("open", price)),
+                        "high": float(k.get("high", price)),
+                        "low": float(k.get("low", price)),
+                        "close": float(k.get("close", price)),
+                        "volume": float(k.get("volume", 0.0)),
+                    })
+                except Exception:
+                    pass
 
 
         # 保存未收盘完整K线用于前端展示
