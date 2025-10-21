@@ -376,7 +376,7 @@ def create_app(engine: TradingEngine, port: int, tz_offset: int, events_q: queue
                 # 仅当末尾仍为 None（表示映射阶段没有现成指标）时计算临时值
                 if ema_list and ema_list[-1] is None:
                     latest_close = float(latest.get('close'))
-                    closes_full = (getattr(engine, 'closes', []) or []) + [latest_close]
+                    closes_full = list(getattr(engine, 'closes', []) or []) + [latest_close]
                     # 重新计算一次末尾指标（开销可接受，确保与指标模块一致）
                     ema_full2 = calc_ema(closes_full, engine.ema_period)
                     sma_full2 = calc_sma(closes_full, engine.ma_period)
@@ -1186,6 +1186,12 @@ def main():
     if len(hist_sorted_latest) > need:
         hist_sorted_latest = hist_sorted_latest[-need:]
     engine.ingest_historical(hist_sorted_latest)
+    # 释放历史缓冲占用的内存（仅启动阶段）
+    try:
+        del all_klines
+        del hist_sorted_latest
+    except Exception:
+        pass
 
     # 事件队列供前端 SSE 使用
     events_q: queue.Queue = queue.Queue(maxsize=1000)

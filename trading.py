@@ -18,6 +18,8 @@ from typing import Optional, Callable
 import math
 import logging
 from logging.handlers import RotatingFileHandler
+from collections import deque
+from itertools import islice
 
 from indicators import ema, sma, crossover, is_rising
 from binance_client import BinanceClient
@@ -51,14 +53,15 @@ class TradingEngine:
 
         self.ema_period = int(icfg.get("ema_period", 5))
         self.ma_period = int(icfg.get("ma_period", 15))
+        self._ema_k: float = (2.0 / (self.ema_period + 1)) if self.ema_period > 0 else 0.0
 
         # 状态
         self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
         self.current_price: float | None = None
-        self.timestamps: list[int] = []  # close_time
-        self.closes: list[float] = []
-        self.ema_list: list[float] = []
-        self.ma_list: list[float] = []
+        self.timestamps = deque(maxlen=self.series_maxlen)  # close_time
+        self.closes = deque(maxlen=self.series_maxlen)
+        self.ema_list = deque(maxlen=self.series_maxlen)
+        self.ma_list = deque(maxlen=self.series_maxlen)
         self.latest_kline: dict | None = None  # 未收盘的实时K线（完整O/H/L/C/Vol）
         # 交叉日志去抖：仅当金叉/死叉状态发生变化时写日志
         self._last_cross_tag: str | None = None  # 'GOLDEN' | 'DEATH' | None
@@ -71,6 +74,8 @@ class TradingEngine:
         self.use_closed_only: bool = bool(icfg.get("use_closed_only", True))
         # 是否将 EMA/MA 斜率（趋势）纳入开仓条件
         self.use_slope: bool = bool(icfg.get("use_slope", True))
+        # 内存优化：限制内存中序列的最大长度（默认 2000）
+        self.series_maxlen: int = int(tcfg.get("series_maxlen", 2000))
 
         # 日志文件（项目目录下 trading.log）
         try:
@@ -487,12 +492,47 @@ class TradingEngine:
         self.ema_list = ema(self.closes, self.ema_period)
         self.ma_list = sma(self.closes, self.ma_period)
 
+    def _trim_series_if_needed(self, *, recalc: bool = False):
+        try:
+            maxlen = int(getattr(self, "series_maxlen", 0))
+        except Exception:
+            maxlen = 0
+        if maxlen <= 0:
+            if recalc:
+                self._recalc_indicators()
+            return
+        n = len(self.timestamps)
+        if n <= maxlen:
+            if recalc:
+                self._recalc_indicators()
+            return
+        keep = maxlen
+        self.timestamps = self.timestamps[-keep:]
+        self.closes = self.closes[-keep:]
+        if recalc:
+            self._recalc_indicators()
+        else:
+            try:
+                self.ema_list = self.ema_list[-keep:] if self.ema_list else []
+                self.ma_list = self.ma_list[-keep:] if self.ma_list else []
+            except Exception:
+                self._recalc_indicators()
+
     def ingest_historical(self, klines: list[dict]):
         for k in klines:
             self._insert_kline(k)
             self.timestamps.append(k["close_time"])
             self.closes.append(float(k["close"]))
-        self._recalc_indicators()
+        # 启动阶段：一次性计算完整指标并填充到 deque；避免逐根增量的开销
+        try:
+            closes_list = list(self.closes)
+            ema_full = ema(closes_list, self.ema_period)
+            sma_full = sma(closes_list, self.ma_period)
+            self.ema_list.clear(); self.ema_list.extend(ema_full)
+            self.ma_list.clear(); self.ma_list.extend(sma_full)
+        except Exception:
+            # 若计算失败则清空以避免脏数据
+            self.ema_list.clear(); self.ma_list.clear()
 
     def on_realtime_kline(self, k: dict):
         # 未收盘也参与计算（更贴近实时策略）；收盘时落库
@@ -505,20 +545,22 @@ class TradingEngine:
             # 仅在收盘事件时推进与更新，未收盘不影响均线计算
             if bool(k.get("is_final", False)):
                 # 新K线或当前K线收盘
-                if not self.timestamps or close_time != self.timestamps[-1]:
+                did_append = (not self.timestamps or close_time != self.timestamps[-1])
+                if did_append:
                     self.timestamps.append(close_time)
                     self.closes.append(price)
                 else:
                     self.closes[-1] = price
-                self._recalc_indicators()
+                self._update_indicators_incremental(appended=did_append)
         else:
             # 未收盘也进入计算：更灵敏，但与交易所图略有差异
-            if not self.timestamps or close_time != self.timestamps[-1]:
+            did_append = (not self.timestamps or close_time != self.timestamps[-1])
+            if did_append:
                 self.timestamps.append(close_time)
                 self.closes.append(price)
             else:
                 self.closes[-1] = price
-            self._recalc_indicators()
+            self._update_indicators_incremental(appended=did_append)
 
 
         # 保存未收盘完整K线用于前端展示

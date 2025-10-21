@@ -15,6 +15,7 @@
     "enable_tick_log": false,            // 是否打印高频 [TICK] 日志（默认关闭）
     "enable_signal_debug_log": true,     // 是否打印开仓信号调试日志（默认关闭）
     "auto_set_dual_side": true,         // 启动后自动检查并开启双向持仓（hedge mode）
+    "series_maxlen": 1000,      // 最大K线数据长度（超出部分会被自动删除）
     // 确认等待窗口：类似 WebDriverWait，在该超时内轮询持仓状态直至达成
     "confirm_timeout_sec": 5.0,         // 单次确认超时（秒），如 2.0 秒
     "confirm_poll_interval_sec": 0.25   // 轮询间隔（秒），如 0.25 秒

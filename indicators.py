@@ -84,9 +84,21 @@ def crossover(ema_list: list[float], ma_list: list[float], eps: float = 1e-8) ->
     return CrossSignal(golden_cross=golden, death_cross=death)
 
 
-def is_rising(series: list[float], lookback: int = 3) -> bool:
-    """判断指标是否呈上升趋势：最近 lookback 根单调非降。"""
-    vals = [v for v in series[-lookback:] if v is not None]
-    if len(vals) < lookback:
+def is_rising(series: t.Sequence[float | None], lookback: int = 3) -> bool:
+    """判断指标是否呈上升趋势：最近 lookback 根单调非降。
+
+    兼容 list/deque 等序列类型，避免切片带来的拷贝与不兼容。
+    """
+    try:
+        n = len(series)
+    except Exception:
         return False
+    if n < lookback:
+        return False
+    vals: list[float] = []
+    for i in range(n - lookback, n):
+        v = series[i]
+        if v is None:
+            return False
+        vals.append(float(v))
     return all(vals[i] <= vals[i + 1] for i in range(len(vals) - 1))
