@@ -264,6 +264,9 @@ class TradingEngine:
             """
         )
         cur.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_klines_unique ON klines(symbol, interval, close_time)"""
+        )
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -391,7 +394,7 @@ class TradingEngine:
         cur = self._db.cursor()
         cur.execute(
             """
-            INSERT INTO klines(symbol, interval, open_time, close_time, open, high, low, close, volume)
+            INSERT OR IGNORE INTO klines(symbol, interval, open_time, close_time, open, high, low, close, volume)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
