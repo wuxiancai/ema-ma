@@ -394,8 +394,15 @@ class TradingEngine:
         cur = self._db.cursor()
         cur.execute(
             """
-            INSERT OR IGNORE INTO klines(symbol, interval, open_time, close_time, open, high, low, close, volume)
+            INSERT INTO klines(symbol, interval, open_time, close_time, open, high, low, close, volume)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, interval, close_time) DO UPDATE SET
+                open_time=excluded.open_time,
+                open=excluded.open,
+                high=excluded.high,
+                low=excluded.low,
+                close=excluded.close,
+                volume=excluded.volume
             """,
             (
                 self.symbol,
