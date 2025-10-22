@@ -40,6 +40,8 @@ class TradingEngine:
 
         self.symbol = tcfg.get("symbol", "BTCUSDT").upper()
         self.interval = tcfg.get("interval", "1m")
+        # 价格来源：last=成交价K线；mark=标记价K线（对齐官网图）
+        self.kline_source: str = str(tcfg.get("kline_source", "last")).lower()
         # 初始保证金：默认使用配置；若为实盘模式且提供密钥，则从合约账户余额获取
         self.initial_balance = float(tcfg.get("initial_balance", 1000.0))
         self.balance = self.initial_balance

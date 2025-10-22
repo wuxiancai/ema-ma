@@ -72,6 +72,16 @@ def load_config() -> dict:
     return cfg
 
 
+# 按配置选择 K 线来源（成交价/标记价）
+def _fetch_klines(client: BinanceClient, source: str, symbol: str, interval: str, *, limit: int, end_time_ms: int | None = None) -> list[dict]:
+    try:
+        if str(source).lower() == 'mark':
+            return client.get_mark_klines(symbol=symbol, interval=interval, limit=limit, end_time_ms=end_time_ms)
+        return client.get_klines(symbol=symbol, interval=interval, limit=limit, end_time_ms=end_time_ms)
+    except Exception:
+        return []
+
+
 def get_sysinfo() -> dict:
     """采集系统信息（CPU/MEM/DISK），含剩余容量（字节）。"""
     try:
@@ -167,21 +177,23 @@ def start_ws(
                 pass
 
     def on_open():
-        # WS 连接成功：用 REST 快速补齐断线期间缺失的收盘K线
+        # WS 连接成功：用 REST 快速补齐断线期间缺失的收盘K线（按 kline_source）
         try:
             last_ct = None
             try:
                 last_ct = engine.latest_db_close_time()
             except Exception:
                 last_ct = None
-            chunk = client.get_klines(symbol=symbol, interval=interval, limit=1000)
+            # 使用配置指定的数据源：成交价或标记价
+            chunk = _fetch_klines(client, engine.kline_source, symbol, interval, limit=1000)
             if chunk:
                 miss = []
                 base = int(last_ct) if isinstance(last_ct, (int, float)) else None
                 for k in chunk:
                     try:
                         ct = int(k["close_time"])
-                        if (base is None) or (ct > base):
+                        # 包含等于 base 的收盘，确保可覆盖潜在混源的那一根
+                        if (base is None) or (ct >= base):
                             miss.append(k)
                     except Exception:
                         pass
@@ -206,6 +218,7 @@ def start_ws(
         on_open_cb=on_open,
         on_error_cb=on_error,
         on_close_cb=on_close,
+        use_mark_price=(str(getattr(engine, "kline_source", "last")).lower() == "mark"),
     )
     ws.start()
     return ws
@@ -330,7 +343,7 @@ def start_kline_reconciler(engine: TradingEngine, client: BinanceClient, events_
                     base = engine.latest_db_close_time()
                 except Exception:
                     base = None
-                chunk = client.get_klines(symbol=engine.symbol, interval=engine.interval, limit=200)
+                chunk = _fetch_klines(client, engine.kline_source, engine.symbol, engine.interval, limit=200)
                 if not chunk:
                     time.sleep(check_ms / 1000.0)
                     continue
@@ -338,17 +351,9 @@ def start_kline_reconciler(engine: TradingEngine, client: BinanceClient, events_
                 b = int(base) if isinstance(base, (int, float)) else None
                 for k in chunk:
                     try:
-                        ct = int(k["close_time"]) if isinstance(k, dict) else int(k[6])
-                        if (b is None) or (ct > b):
-                            miss.append(k if isinstance(k, dict) else {
-                                "open_time": int(k[0]),
-                                "open": float(k[1]),
-                                "high": float(k[2]),
-                                "low": float(k[3]),
-                                "close": float(k[4]),
-                                "volume": float(k[5]),
-                                "close_time": ct,
-                            })
+                        ct = int(k["close_time"])
+                        if (b is None) or (ct >= b):
+                            miss.append(k)
                     except Exception:
                         pass
                 if miss:
@@ -1265,7 +1270,9 @@ def main():
     all_klines: list[dict] = []
     end_time_ms = None
     while len(all_klines) < need:
-        chunk = client.get_klines(
+        chunk = _fetch_klines(
+            client,
+            engine.kline_source,
             symbol=tcfg.get("symbol", "BTCUSDT"),
             interval=tcfg.get("interval", "1m"),
             limit=min(1000, need - len(all_klines)),

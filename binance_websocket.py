@@ -30,6 +30,7 @@ class BinanceWebSocket:
         on_error_cb: t.Optional[t.Callable[[t.Any], None]] = None,
         on_close_cb: t.Optional[t.Callable[[], None]] = None,
         auto_reconnect: bool = True,
+        use_mark_price: bool = False,
     ) -> None:
         self.symbol = symbol.upper()
         self.interval = interval
@@ -38,6 +39,7 @@ class BinanceWebSocket:
         self.on_error_cb = on_error_cb
         self.on_close_cb = on_close_cb
         self.auto_reconnect = auto_reconnect
+        self.use_mark_price = use_mark_price
 
         self._ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
@@ -48,7 +50,8 @@ class BinanceWebSocket:
     def url(self) -> str:
         # 使用 combined stream 更通用：/stream?streams=
         # 兼容多流场景，且服务端行为更稳定
-        stream = f"{self.symbol.lower()}@kline_{self.interval}"
+        stream_name = 'markPrice_kline' if self.use_mark_price else 'kline'
+        stream = f"{self.symbol.lower()}@{stream_name}_{self.interval}"
         return f"wss://fstream.binance.com/stream?streams={stream}"
 
     def _on_message(self, _ws, message: str):

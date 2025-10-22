@@ -73,6 +73,42 @@ class BinanceClient:
 
         return klines
 
+    def get_mark_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 100,
+        end_time_ms: int | None = None,
+    ) -> list[dict]:
+        """获取标记价 K 线数据（USDⓈ-M）。
+
+        端点：GET /fapi/v1/markPriceKlines
+        字段映射与普通 K 线一致。
+        """
+        url = f"{self.base_url}/fapi/v1/markPriceKlines"
+        params = {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "limit": limit,
+        }
+        if end_time_ms:
+            params["endTime"] = end_time_ms
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        raw = resp.json()
+        out: list[dict] = []
+        for k in raw:
+            out.append({
+                "open_time": int(k[0]),
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5]),
+                "close_time": int(k[6]),
+            })
+        return out
+
     def get_price(self, symbol: str) -> float:
         """获取最新价格 (mark price/ticker price)。此处使用 ticker price。"""
         url = f"{self.base_url}/fapi/v1/ticker/price"
