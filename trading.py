@@ -389,7 +389,7 @@ class TradingEngine:
         cur = self._db.cursor()
         cur.execute(
             """
-            INSERT INTO klines(symbol, interval, open_time, close_time, open, high, low, close, volume)
+            INSERT OR IGNORE INTO klines(symbol, interval, open_time, close_time, open, high, low, close, volume)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
