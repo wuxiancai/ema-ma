@@ -18,8 +18,6 @@ from typing import Optional, Callable
 import math
 import logging
 from logging.handlers import RotatingFileHandler
-from collections import deque
-from itertools import islice
 
 from indicators import ema, sma, crossover, is_rising
 from binance_client import BinanceClient
@@ -40,8 +38,6 @@ class TradingEngine:
 
         self.symbol = tcfg.get("symbol", "BTCUSDT").upper()
         self.interval = tcfg.get("interval", "1m")
-        # 价格来源：last=成交价K线；mark=标记价K线（对齐官网图）
-        self.kline_source: str = str(tcfg.get("kline_source", "last")).lower()
         # 初始保证金：默认使用配置；若为实盘模式且提供密钥，则从合约账户余额获取
         self.initial_balance = float(tcfg.get("initial_balance", 1000.0))
         self.balance = self.initial_balance
@@ -55,17 +51,17 @@ class TradingEngine:
 
         self.ema_period = int(icfg.get("ema_period", 5))
         self.ma_period = int(icfg.get("ma_period", 15))
-        self._ema_k: float = (2.0 / (self.ema_period + 1)) if self.ema_period > 0 else 0.0
+        
 
         # 状态
         self.position = Position(side=None, entry_price=None, qty=None, open_fee=None)
         self.current_price: float | None = None
         # 内存优化：限制内存中序列的最大长度（默认 2000）
         self.series_maxlen: int = int(tcfg.get("series_maxlen", 2000))
-        self.timestamps = deque(maxlen=self.series_maxlen)  # close_time
-        self.closes = deque(maxlen=self.series_maxlen)
-        self.ema_list = deque(maxlen=self.series_maxlen)
-        self.ma_list = deque(maxlen=self.series_maxlen)
+        self.timestamps = []  # close_time
+        self.closes = []
+        self.ema_list = []
+        self.ma_list = []
         self.latest_kline: dict | None = None  # 未收盘的实时K线（完整O/H/L/C/Vol）
         # 交叉日志去抖：仅当金叉/死叉状态发生变化时写日志
         self._last_cross_tag: str | None = None  # 'GOLDEN' | 'DEATH' | None
@@ -266,9 +262,6 @@ class TradingEngine:
             """
         )
         cur.execute(
-            """CREATE UNIQUE INDEX IF NOT EXISTS idx_klines_unique ON klines(symbol, interval, close_time)"""
-        )
-        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -398,13 +391,6 @@ class TradingEngine:
             """
             INSERT INTO klines(symbol, interval, open_time, close_time, open, high, low, close, volume)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(symbol, interval, close_time) DO UPDATE SET
-                open_time=excluded.open_time,
-                open=excluded.open,
-                high=excluded.high,
-                low=excluded.low,
-                close=excluded.close,
-                volume=excluded.volume
             """,
             (
                 self.symbol,
@@ -419,36 +405,6 @@ class TradingEngine:
             ),
         )
         self._db.commit()
-
-    def _insert_kline_if_absent(self, k: dict):
-        """仅在数据库不存在该 close_time 的记录时插入，避免重复。"""
-        try:
-            ct = int(k["close_time"])
-            cur = self._db.cursor()
-            cur.execute(
-                "SELECT id FROM klines WHERE symbol=? AND interval=? AND close_time=? LIMIT 1",
-                (self.symbol, self.interval, ct),
-            )
-            r = cur.fetchone()
-            if not r:
-                self._insert_kline(k)
-        except Exception:
-            pass
-
-    def latest_db_close_time(self) -> int | None:
-        """查询当前品种与周期的最近一根收盘时间（毫秒）。"""
-        try:
-            cur = self._db.cursor()
-            cur.execute(
-                "SELECT close_time FROM klines WHERE symbol=? AND interval=? ORDER BY close_time DESC LIMIT 1",
-                (self.symbol, self.interval),
-            )
-            r = cur.fetchone()
-            if r and (r[0] is not None):
-                return int(r[0])
-            return None
-        except Exception:
-            return None
 
     def _insert_trade(self, side: str, price: float, qty: float, fee: float, pnl: float):
         cur = self._db.cursor()
@@ -565,16 +521,8 @@ class TradingEngine:
             self._insert_kline(k)
             self.timestamps.append(k["close_time"])
             self.closes.append(float(k["close"]))
-        # 启动阶段：一次性计算完整指标并填充到 deque；避免逐根增量的开销
-        try:
-            closes_list = list(self.closes)
-            ema_full = ema(closes_list, self.ema_period)
-            sma_full = sma(closes_list, self.ma_period)
-            self.ema_list.clear(); self.ema_list.extend(ema_full)
-            self.ma_list.clear(); self.ma_list.extend(sma_full)
-        except Exception:
-            # 若计算失败则清空以避免脏数据
-            self.ema_list.clear(); self.ma_list.clear()
+        # 计算完整指标并按需裁剪
+        self._trim_series_if_needed(recalc=True)
 
     def on_realtime_kline(self, k: dict):
         # 未收盘也参与计算（更贴近实时策略）；收盘时落库
@@ -593,20 +541,7 @@ class TradingEngine:
                     self.closes.append(price)
                 else:
                     self.closes[-1] = price
-                self._update_indicators_incremental(appended=did_append)
-                # 收盘事件：写入数据库（去重）
-                try:
-                    self._insert_kline_if_absent({
-                        "open_time": int(k.get("open_time", close_time)),
-                        "close_time": close_time,
-                        "open": float(k.get("open", price)),
-                        "high": float(k.get("high", price)),
-                        "low": float(k.get("low", price)),
-                        "close": float(k.get("close", price)),
-                        "volume": float(k.get("volume", 0.0)),
-                    })
-                except Exception:
-                    pass
+                self._trim_series_if_needed(recalc=True)
         else:
             # 未收盘也进入计算：更灵敏，但与交易所图略有差异
             did_append = (not self.timestamps or close_time != self.timestamps[-1])
@@ -615,21 +550,7 @@ class TradingEngine:
                 self.closes.append(price)
             else:
                 self.closes[-1] = price
-            self._update_indicators_incremental(appended=did_append)
-            # 若为收盘事件，则写库（仅一次，去重）
-            if bool(k.get("is_final", False)):
-                try:
-                    self._insert_kline_if_absent({
-                        "open_time": int(k.get("open_time", close_time)),
-                        "close_time": close_time,
-                        "open": float(k.get("open", price)),
-                        "high": float(k.get("high", price)),
-                        "low": float(k.get("low", price)),
-                        "close": float(k.get("close", price)),
-                        "volume": float(k.get("volume", 0.0)),
-                    })
-                except Exception:
-                    pass
+            self._trim_series_if_needed(recalc=True)
 
 
         # 保存未收盘完整K线用于前端展示
@@ -922,7 +843,9 @@ class TradingEngine:
                         if closed:
                             self._open_with_confirm("LONG", price)
 
-        # 收盘入库逻辑已在各分支中处理（去重），此处移除重复插入。
+        # 收盘时落库
+        if bool(k.get("is_final", False)):
+            self._insert_kline(k)
 
     # --------------------- Trading Logic ---------------------
     def _notional_and_qty(self, price: float) -> tuple[float, float]:
@@ -1370,6 +1293,6 @@ class TradingEngine:
 
     def recent_klines(self, limit: int = 5) -> list[dict]:
         cur = self._db.cursor()
-        cur.execute("SELECT * FROM klines ORDER BY close_time DESC LIMIT ?", (limit,))
+        cur.execute("SELECT * FROM klines ORDER BY id DESC LIMIT ?", (limit,))
         rows = cur.fetchall()
         return [dict(r) for r in rows]
